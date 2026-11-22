@@ -163,23 +163,36 @@
     banner.hidden = true;
   }
 
+  /** 「在本机记住」的一句话状态：让用户知道现在是免密状态、还剩几天 */
+  function rememberText(remember) {
+    const r = remember || {};
+    if (!r.on) return '';
+    if (r.expired) return '本机记住已过期';
+    if (!r.active) return '本机记住待生效';
+    if (!r.expiresAt) return '本机已记住（永久）';
+    return '本机已记住 · 还剩 ' + U.formatRemaining(r.remainingMs);
+  }
+
   function renderStatus(res) {
+    const remembered = rememberText(res.remember);
+    const tail = remembered ? ' · ' + remembered : '';
     if (res.locked) {
-      setPersistentStatus('已加密 · 未解锁', false);
+      setPersistentStatus('已加密 · 未解锁' + tail, false);
       return;
     }
     if (!res.configured) {
-      setPersistentStatus('未配置 WebDAV · 仅本机保存', false);
+      setPersistentStatus('未配置 WebDAV · 仅本机保存' + tail, false);
       return;
     }
     if (res.lastError) {
-      setPersistentStatus('同步失败：' + res.lastError, true);
+      setPersistentStatus('同步失败：' + res.lastError + tail, true);
       return;
     }
     const parts = [];
     if (res.dirty) parts.push('有改动待上传');
     parts.push('上次同步 ' + U.formatRelativeTime(res.lastSyncAt));
     if (res.encrypted) parts.push('已加密');
+    if (remembered) parts.push(remembered);
     setPersistentStatus(parts.join(' · '), false);
   }
 

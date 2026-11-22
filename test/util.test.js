@@ -59,3 +59,13 @@ test('withTimeout 在超时后拒绝', async () => {
   const slow = new Promise(() => {});
   await assert.rejects(() => U.withTimeout(slow, 30, '测试'), /测试超时/);
 });
+
+test('formatRemaining：把剩余时间说成人话', () => {
+  assert.equal(U.formatRemaining(null), '');
+  assert.equal(U.formatRemaining(0), '已过期');
+  assert.equal(U.formatRemaining(-1), '已过期');
+  assert.equal(U.formatRemaining(30 * 60 * 1000), '不到 1 小时');
+  assert.equal(U.formatRemaining(5 * 3600 * 1000), '5 小时');
+  assert.equal(U.formatRemaining(86400000), '1 天');
+  assert.equal(U.formatRemaining(4.2 * 86400000), '5 天');
+});

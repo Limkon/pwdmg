@@ -375,7 +375,10 @@ test('记住本机：已过期的密钥被拒绝，按锁定处理', async (t) =
   const fresh = loadBackground({ store: fake.store });
   const list = await fresh.send({ type: 'vault:list' });
   assert.equal(list.locked, true, '过期密钥不能自动解锁');
-  assert.equal(fresh.store.get('rememberedKey'), undefined, '过期密钥应被清除');
+  // 过期后密钥本身必须丢掉，只留一条不含密钥的「已过期」标记（界面要据此显示状态）
+  const leftover = fresh.store.get('rememberedKey');
+  assert.equal(leftover && leftover.key, '', '过期密钥必须被清除');
+  assert.equal(leftover.expired, true, '留下「已过期」标记');
 
   const wrong = await fresh.send({ type: 'vault:unlock', password: 'not-the-password' });
   assert.equal(wrong.ok, false);
@@ -418,4 +421,72 @@ test('记住本机：0 天 = 永久有效（直到手动锁定），过期不影
   // 手动锁定后，开启的记忆被清除
   await fresh.send({ type: 'vault:lock' });
   assert.equal(fresh.store.get('rememberedKey'), undefined);
+});
+
+test('记住本机：状态里能看到「已生效 / 还剩几天」', async (t) => {
+  const { server, fake } = await setup(t);
+  await seedCredential(fake, server, 'alice', 'pw-1');
+  await fake.send({ type: 'vault:enableEncryption', password: MASTER });
+
+  // 还没开启
+  const off = await fake.send({ type: 'vault:status' });
+  assert.equal(off.remember.on, false);
+  assert.equal(off.remember.active, false);
+
+  await fake.send({ type: 'vault:rememberDevice', remember: true, days: 7 });
+
+  const on = await fake.send({ type: 'vault:status' });
+  assert.equal(on.remember.on, true);
+  assert.equal(on.remember.active, true, '开启后立即生效');
+  assert.equal(on.remember.days, 7);
+  assert.ok(on.remember.expiresAt, '有到期时间');
+  assert.ok(on.remember.remainingMs > 6 * 24 * 3600 * 1000);
+  assert.equal(on.remember.remainingDays, 7, '还剩 7 天');
+  assert.equal(on.remember.expired, false);
+
+  // 单独的状态查询也能拿到（设置页刷新用）
+  const status = await fake.send({ type: 'vault:rememberStatus' });
+  assert.equal(status.ok, true);
+  assert.equal(status.remember.active, true);
+  assert.equal(status.remember.remainingDays, 7);
+
+  // 弹窗用的 vault:list 也要带上
+  const list = await fake.send({ type: 'vault:list' });
+  assert.equal(list.remember.active, true);
+  assert.equal(list.remember.remainingDays, 7);
+
+  // 浏览器重启后仍然显示「已生效 · 还剩 N 天」，而不是让用户猜
+  const fresh = loadBackground({ store: fake.store });
+  const afterRestart = await fresh.send({ type: 'vault:status' });
+  assert.equal(afterRestart.locked, false, '重启后免密');
+  assert.equal(afterRestart.remember.active, true);
+  assert.ok(afterRestart.remember.remainingDays >= 6 && afterRestart.remember.remainingDays <= 7);
+});
+
+test('记住本机：过期或未写入时状态明确区分', async (t) => {
+  const { server, fake } = await setup(t);
+  await seedCredential(fake, server, 'alice', 'pw-1');
+  await fake.send({ type: 'vault:enableEncryption', password: MASTER });
+  await fake.send({ type: 'vault:rememberDevice', remember: true, days: 7 });
+
+  // 过期：不自动解锁，状态显示已过期
+  const rec = fake.store.get('rememberedKey');
+  rec.expiresAt = new Date(Date.now() - 1000).toISOString();
+  fake.store.set('rememberedKey', rec);
+
+  const fresh = loadBackground({ store: fake.store });
+  const expired = await fresh.send({ type: 'vault:status' });
+  assert.equal(expired.locked, true);
+  assert.equal(expired.remember.on, true, '开关仍是开着的');
+  assert.equal(expired.remember.active, false);
+  assert.equal(expired.remember.expired, true);
+
+  // 永久：没有到期时间，active 且不是 expired
+  const permanent = await fresh.send({ type: 'vault:unlock', password: MASTER });
+  assert.equal(permanent.ok, true, permanent.error);
+  await fresh.send({ type: 'vault:rememberDevice', remember: true, days: 0 });
+  const forever = await fresh.send({ type: 'vault:status' });
+  assert.equal(forever.remember.active, true);
+  assert.equal(forever.remember.expiresAt, null);
+  assert.equal(forever.remember.expired, false);
 });
