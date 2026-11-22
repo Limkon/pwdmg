@@ -214,6 +214,37 @@
     if (res && res.ok) renderNotice('');
   }
 
+  /**
+   * 「在本机记住」的真实状态：不是只看开关，而是看现在到底有没有可用的密钥、还剩几天。
+   * 浏览器重启后免输入主密码时，这里会明确显示「已生效 · 还剩 N 天」。
+   */
+  function renderRemember(remember) {
+    const node = el('enc-remember-status');
+    if (!node) return;
+    const r = remember || {};
+    if (!r.on) {
+      setResult(node, '状态：未开启 · 浏览器重启后需要重新输入主密码', '');
+      return;
+    }
+    if (!r.active && r.expired) {
+      setResult(node, '状态：已过期 · 下次解锁需要输入主密码（解锁后会重新计时）', 'warn');
+      return;
+    }
+    if (!r.active) {
+      // 开关开着，但当前是锁定态且本机没有有效密钥：解锁一次就会写入
+      setResult(node, '状态：已开启 · 尚未写入本机（解锁一次后生效）', 'warn');
+      return;
+    }
+    if (!r.expiresAt) {
+      setResult(node, '状态：已生效 · 永久（直到手动锁定或关闭开关）', 'ok');
+      return;
+    }
+    const left = U.formatRemaining(r.remainingMs);
+    const leftDays = Number(r.remainingDays) || 0;
+    const tail = r.savedAt ? '（写入于 ' + U.formatRelativeTime(r.savedAt) + '）' : '';
+    setResult(node, '状态：已生效 · 还剩 ' + left + '（共 ' + (Number(r.days) || leftDays) + ' 天）' + tail, 'ok');
+  }
+
   function renderEncryption(status) {
     const encrypted = !!status.encrypted;
     const locked = !!status.locked;
@@ -223,6 +254,7 @@
     el('enc-unlock').hidden = !(encrypted && locked);
     el('enc-manage').hidden = !(encrypted && !locked);
     el('enc-remember').hidden = !encrypted;
+    renderRemember(status && status.remember);
 
     if (!encrypted) {
       setResult(node, '当前未启用加密：密码库以明文 JSON 保存。', 'warn');
@@ -770,7 +802,12 @@
     }
     state.vault = Vault.normalize(res.vault);
     renderNotice(res.notice);
-    state.encryption = { encrypted: !!res.encrypted, locked: !!res.locked, kdfIterations: res.kdfIterations };
+    state.encryption = {
+      encrypted: !!res.encrypted,
+      locked: !!res.locked,
+      kdfIterations: res.kdfIterations,
+      remember: res.remember || null,
+    };
     renderEncryption(state.encryption);
     renderVault();
     renderExportHint();
@@ -837,6 +874,9 @@
           ? '已开启：本机永久记住（直到手动锁定）'
           : `已开启：本机 ${d} 天内免输入主密码`;
       setMsg('enc-remember-msg', text, 'ok');
+      // 以后台的真实记录为准刷新「还剩几天」
+      const status = await sendMessage({ type: 'vault:rememberStatus' });
+      if (status && status.ok) renderRemember(status.remember);
     } else {
       setMsg('enc-remember-msg', (res && res.error) || '保存失败', 'error');
     }

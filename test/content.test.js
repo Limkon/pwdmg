@@ -81,8 +81,10 @@ function createPage(t, html, options) {
     deleted: [],
     resolve: [],
     state: 0,
+    learned: [],
     messageListeners: [],
   };
+  const siteMemory = opts.siteMemory || null;
   const getState = opts.getState || stateResponse();
   const captureResponse = opts.captureResponse || null;
 
@@ -119,6 +121,11 @@ function createPage(t, html, options) {
           case 'credential:delete':
             calls.deleted.push(message);
             return { ok: true };
+          case 'site:memory':
+            return { ok: true, host: message.host, memory: siteMemory };
+          case 'site:learn':
+            calls.learned.push(message);
+            return { ok: true, memory: message.memory };
           default:
             return { ok: true };
         }
@@ -846,4 +853,104 @@ test('样式走 adoptedStyleSheets（严格 CSP 站点不会因为没有样式�
   }
   // 无论走哪条路，<style> 都不应该被重复塞很多份
   assert.ok(root.querySelectorAll('style').length <= 1);
+});
+
+/* ------------------------------------------------------------------ *
+ * 智能识别：站点自适应
+ * ------------------------------------------------------------------ */
+
+test('智能识别：学会的字段选择器会写回本机（只含选择器与状态，不含密码）', { skip }, async (t) => {
+  const page = createPage(
+    t,
+    '<form id="login"><input id="account" name="login_id" type="text" />' +
+      '<input id="secret" name="login_pw" type="password" /><button type="submit">登录</button></form>',
+    {
+      getState: stateResponse({
+        entries: [{ id: 'e1', host: 'example.com', title: 'example.com', username: 'alice', password: 'pw-alice' }],
+      }),
+    }
+  );
+  const { window, calls } = page;
+  await until(() => keyButtonOf(window), '注入图标');
+  keyButtonOf(window).click();
+  await until(() => panelOf(window) && panelOf(window).hidden === false, '面板已打开');
+  overlayOf(window).querySelector('.row .mini').click();
+
+  await until(() => calls.learned.length >= 1, '学习到站点线索', 4000);
+  const learned = calls.learned[0];
+  assert.equal(learned.host, 'example.com');
+  assert.equal(learned.memory.user, '#account');
+  assert.equal(learned.memory.pass, '#secret');
+  assert.ok(learned.memory.markers.includes('login'), '记住页面是登录界面');
+  assert.equal(JSON.stringify(learned.memory).includes('pw-alice'), false, '不能把密码写进线索');
+});
+
+test('智能识别：命中记住的选择器时优先用它，而不是分数更高的文本框', { skip }, async (t) => {
+  const page = createPage(
+    t,
+    '<form id="login">' +
+      '<input id="q" name="search" type="search" placeholder="搜索" />' +
+      '<input id="mail" name="email" type="email" placeholder="邮箱" />' +
+      '<input id="secret" name="login_pw" type="password" />' +
+      '<button type="submit">登录</button></form>',
+    {
+      getState: stateResponse({
+        settings: Object.assign({}, DEFAULT_SETTINGS, { autoFillSingle: true }),
+        entries: [{ id: 'e1', host: 'example.com', title: 'example.com', username: 'alice', password: 'pw-alice' }],
+      }),
+      siteMemory: { user: '#q', pass: '#secret', markers: ['login'] },
+    }
+  );
+  const { window } = page;
+
+  await until(() => window.document.getElementById('secret').value === 'pw-alice', '自动填充', 4000);
+  assert.equal(window.document.getElementById('q').value, 'alice', '按记住的选择器写入用户名字段');
+  assert.equal(window.document.getElementById('mail').value, '');
+});
+
+test('智能识别：同一页面有多个表单时，按页面文案挑登录框而不是注册框', { skip }, async (t) => {
+  const page = createPage(
+    t,
+    '<div id="signup-box"><h2>注册新账号</h2>' +
+      '<form><input id="su" name="username" type="text" />' +
+      '<input id="sp" name="password" type="password" /></form></div>' +
+      '<div id="login-box"><h2>登录</h2>' +
+      '<form><input id="lu" name="username" type="text" />' +
+      '<input id="lp" name="password" type="password" /></form></div>',
+    { getState: stateResponse({ settings: Object.assign({}, DEFAULT_SETTINGS, { autoOpenPanel: true }) }) }
+  );
+  const { window } = page;
+
+  await until(() => panelOf(window) && panelOf(window).hidden === false, '面板已打开', 4000);
+  overlayOf(window).querySelector('.row .mini').click();
+  await until(() => window.document.getElementById('lp').value === 'pw-alice', '填进登录框', 3000);
+  assert.equal(window.document.getElementById('sp').value, '', '注册框不应被填');
+});
+
+test('智能识别：页面上已输入的账号决定首选记录', { skip }, async (t) => {
+  const page = createPage(
+    t,
+    '<form id="login"><input id="u" name="username" type="text" />' +
+      '<input id="p" name="password" type="password" /></form>',
+    {
+      getState: stateResponse({
+        entries: [
+          { id: 'e1', host: 'example.com', title: 'example.com', username: 'alice', password: 'pw-alice' },
+          { id: 'e2', host: 'example.com', title: 'example.com', username: 'bob', password: 'pw-bob' },
+        ],
+      }),
+    }
+  );
+  const { window } = page;
+  await until(() => keyButtonOf(window), '注入图标');
+
+  // 用户在页面上先输入了 bob
+  const user = window.document.getElementById('u');
+  user.value = 'bob';
+  user.dispatchEvent(new window.Event('input', { bubbles: true }));
+
+  keyButtonOf(window).click();
+  await until(() => panelOf(window) && panelOf(window).hidden === false, '面板已打开');
+  const firstRow = overlayOf(window).querySelector('.row .title');
+  assert.equal(firstRow.textContent, 'bob', '与已输入账号匹配的记录排在最前');
 });

@@ -496,6 +496,161 @@
    * 表单识别
    * ------------------------------------------------------------------ */
 
+  /* ------------------------------------------------------------------ *
+   * 智能识别（站点自适应）
+   *
+   * 每个网站的登录框长得都不一样，通用猜法总会漏。这里做三件事：
+   *  1. 记住每个站点上次成功填充的输入框选择器，下次直接命中（命中不了再退回猜法）；
+   *  2. 记住页面状态关键词（“登录 / Login / 密码登录…”），页面上有多个表单时
+   *     优先选与当前界面文案一致的那个（避免把「注册」当成登录）；
+   *  3. 页面上已经填了账号时，自动挑与之匹配的那条记录。
+   * 选择器与关键词只存在本机，不含任何账号密码。
+   * ------------------------------------------------------------------ */
+
+  const siteMemory = {
+    host: '',
+    user: '',
+    pass: '',
+    markers: [],
+    loaded: false,
+    learnedAt: 0,
+    learned: '', // 上次学到的内容签名，避免重复写存储
+  };
+
+  /** 为一个输入框生成尽量稳定的选择器（优先 id / name / autocomplete） */
+  function selectorFor(el, kind) {
+    if (!el || el.tagName !== 'INPUT') return '';
+    const esc = (value) => String(value).replace(/["\\]/g, '\\$&');
+    const id = el.getAttribute('id');
+    if (id && id.length <= 60 && /^[\w:-]+$/.test(id)) {
+      // 带数字后缀的 id 往往是每次渲染都变的，不适合当锚点
+      if (!/\d{3,}/.test(id)) return '#' + id;
+    }
+    const name = el.getAttribute('name');
+    if (name && /^[\w:.-]+$/.test(name)) return 'input[name="' + esc(name) + '"]';
+    const ac = autoCompleteOf(el);
+    if (ac === 'username' || ac === 'email' || ac === 'current-password') {
+      return 'input[autocomplete="' + esc(ac) + '"]';
+    }
+    const type = String(el.getAttribute('type') || '').toLowerCase();
+    if (type === 'password') return 'input[type="password"]';
+    if (kind === 'user' && (type === 'email' || type === 'text')) {
+      return 'input[type="' + esc(type) + '"]';
+    }
+    return '';
+  }
+
+  /** 按选择器找回输入框（穿透 shadow DOM，失败返回 null） */
+  function findBySelector(selector) {
+    if (!selector) return null;
+    try {
+      for (const el of walkElements(document)) {
+        if (el.tagName !== 'INPUT') continue;
+        if (el.matches(selector) && isVisible(el)) return el;
+      }
+    } catch (err) {
+      /* 选择器写坏了就当没记住 */
+    }
+    return null;
+  }
+
+  /** 页面文案里的状态关键词（登录 / 注册 / 下一步…） */
+  function pageMarkers() {
+    const body = document.body;
+    let text = String((body && body.innerText) || '').slice(0, 4000);
+    if (!text && body) {
+      // jsdom 等环境没有 innerText，用 textContent 兜底
+      text = String(body.textContent || '').slice(0, 4000);
+    }
+    text = text.toLowerCase();
+    const markers = [];
+    if (/登录|登入|登陆|sign\s?in|log\s?in/.test(text)) markers.push('login');
+    if (/注册|sign\s?up|create account/.test(text)) markers.push('signup');
+    if (/忘记密码|forgot/.test(text)) markers.push('forgot');
+    if (/密码登录|password login|账号密码/.test(text)) markers.push('password-login');
+    return markers;
+  }
+
+  const MARKER_TEXT = {
+    login: /登录|登入|登陆|sign\s?in|log\s?in/i,
+    signup: /注册|sign\s?up|create account/i,
+    forgot: /忘记密码|forgot/i,
+    'password-login': /密码登录|password login|账号密码/i,
+  };
+
+  /**
+   * 容器与当前页面状态的吻合程度。
+   *
+   * 只看 <form> 自己的文字往往不够：标题（“登录 / 注册”）通常在表单外面的卡片里。
+   * 所以往上多看几层，但离表单越远的文字权重越低，避免整页的「登录」把一切都拉平。
+   */
+  function markerScore(container, markers) {
+    if (!markers || !markers.length || !container) return 0;
+    const texts = [];
+    let node = container;
+    for (let depth = 0; node && depth < 4; depth += 1) {
+      texts.push({ text: String(node.textContent || '').slice(0, 1200).toLowerCase(), weight: 1 / (depth + 1) });
+      node = node.parentElement;
+    }
+    let score = 0;
+    for (const marker of markers) {
+      const re = MARKER_TEXT[marker];
+      if (!re) continue;
+      let best = 0;
+      for (const item of texts) {
+        if (re.test(item.text)) best = Math.max(best, item.weight);
+      }
+      score += best;
+    }
+    return score;
+  }
+
+  function loadSiteMemory() {
+    const host = U.normalizeHost(location.hostname);
+    if (!host || siteMemory.host === host) return;
+    siteMemory.host = host;
+    siteMemory.loaded = false;
+    siteMemory.user = '';
+    siteMemory.pass = '';
+    siteMemory.markers = [];
+    sendMessage({ type: 'site:memory', host }).then((res) => {
+      if (!res || !res.ok || !res.memory) {
+        siteMemory.loaded = true;
+        return;
+      }
+      if (siteMemory.host !== host) return; // 期间已经换了站点
+      siteMemory.user = res.memory.user || '';
+      siteMemory.pass = res.memory.pass || '';
+      siteMemory.markers = Array.isArray(res.memory.markers) ? res.memory.markers : [];
+      siteMemory.loaded = true;
+      // 拿到线索后立刻重新识别一次（首屏可能已经错过）
+      syncButtons();
+      maybeAutoPrompt();
+    });
+  }
+
+  /**
+   * 把「这次识别到的字段」写回站点记忆。只在真的识别出用户名字段或
+   * 页面状态明确时才写，避免把错误选择器学进去。
+   */
+  function learnSite(form) {
+    if (!form || !form.passEl) return;
+    const host = U.normalizeHost(location.hostname);
+    if (!host) return;
+    const user = selectorFor(form.userEl, 'user');
+    const pass = selectorFor(form.passEl, 'pass');
+    const markers = pageMarkers().slice(0, 4);
+    const signature = [user, pass, markers.join(',')].join('|');
+    if (!user && !markers.length) return; // 只认得出一个密码框（多半是分步登录的第二步），线索不可靠
+    if (signature === siteMemory.learned && Date.now() - siteMemory.learnedAt < 60000) return;
+    siteMemory.learned = signature;
+    siteMemory.learnedAt = Date.now();
+    siteMemory.user = user;
+    siteMemory.pass = pass;
+    siteMemory.markers = markers;
+    sendMessage({ type: 'site:learn', host, memory: { user, pass, markers } });
+  }
+
   /**
    * 是不是一个「密码输入框」。
    *
@@ -654,19 +809,35 @@
     return null;
   }
 
+  /** 本页「记住的」密码框（用于多表单时优先选它） */
+  function rememberedPasswordInput() {
+    if (!siteMemory.loaded || !siteMemory.pass) return null;
+    return findBySelector(siteMemory.pass);
+  }
+
   function analyzeForm(container, passEl) {
     if (!container) return null;
     const passes = passwordFieldsIn(container);
     if (!passes.length || !passes.includes(passEl)) return null;
     const isNew = passes.length > 1 || passes.some((el) => autoCompleteOf(el) === 'new-password');
+
+    // 记住的选择器优先：同一站点下次渲染出的登录框直接命中
+    let userEl = null;
+    if (!isNew && siteMemory.loaded && siteMemory.user) {
+      const remembered = findBySelector(siteMemory.user);
+      if (remembered && container.contains(remembered) && !isPasswordInput(remembered)) userEl = remembered;
+    }
+    if (!userEl) userEl = isNew ? null : findUsernameInput(passEl, container);
+
     return {
       formEl: container,
       passEl,
-      userEl: isNew ? null : findUsernameInput(passEl, container),
+      userEl,
       isNew,
       newPassEl: isNew ? findNewPasswordInput(container, passes) : null,
       btn: null,
       lastFill: null,
+      markerScore: markerScore(container, siteMemory.markers),
     };
   }
 
@@ -677,6 +848,17 @@
     for (const el of walkElements(document)) {
       if (isPasswordInput(el) && isVisible(el)) all.push(el);
     }
+
+    // 记住的密码框排在前面：同一容器里有多个密码框时，以学到的那个为准
+    const remembered = rememberedPasswordInput();
+    if (remembered) {
+      const idx = all.indexOf(remembered);
+      if (idx > 0) {
+        all.splice(idx, 1);
+        all.unshift(remembered);
+      }
+    }
+
     for (const passEl of all) {
       const container = containerFor(passEl);
       if (!container || seen.has(container)) continue;
@@ -687,6 +869,29 @@
     return result;
   }
 
+  /** 整体重排列：让最像登录的那个排在最前（按页面状态关键词） */
+  function rankForms(forms) {
+    if (!forms.length) return forms;
+    const preferred = siteMemory.markers.length ? siteMemory.markers : ['login'];
+    const scored = forms.map((form, index) => {
+      const login = markerScore(form.formEl, ['login']);
+      const signup = markerScore(form.formEl, ['signup']);
+      const forgot = markerScore(form.formEl, ['forgot']);
+      return {
+        form,
+        index,
+        score:
+          (form.isNew ? -1 : 1) * 2 +
+          markerScore(form.formEl, preferred) +
+          login -
+          signup * 1.5 -
+          forgot,
+      };
+    });
+    scored.sort((a, b) => b.score - a.score || a.index - b.index);
+    return scored.map((item) => item.form);
+  }
+
   function formFromEvent(ev) {
     const path = typeof ev.composedPath === 'function' ? ev.composedPath() : [];
     const nodes = path.length ? path : [ev.target];
@@ -695,6 +900,13 @@
       for (const form of state.forms) {
         if (node === form.passEl || node === form.userEl) return form;
         if (form.formEl && form.formEl.contains(node)) return form;
+        if (
+          form.passEl &&
+          typeof form.passEl.compareDocumentPosition === 'function' &&
+          node === form.passEl.parentElement
+        ) {
+          return form;
+        }
       }
       const closestForm = node.closest ? node.closest('form') : null;
       if (closestForm) {
@@ -707,7 +919,45 @@
 
   function soleLoginForm() {
     const candidates = state.forms.filter((form) => !form.isNew && isVisible(form.passEl));
-    return candidates.length === 1 ? candidates[0] : null;
+    if (candidates.length === 1) return candidates[0];
+    if (!candidates.length) return null;
+    // 多个登录框（同一页面既有「登录」又有「注册 / 忘记密码」）时，
+    // 按页面状态关键词与实际文案挑最像登录的那个，而不是干脆不认
+    let best = null;
+    let bestScore = -Infinity;
+    for (const form of candidates) {
+      const score = markerScore(form.formEl, siteMemory.markers.length ? siteMemory.markers : ['login']);
+      if (score > bestScore) {
+        bestScore = score;
+        best = form;
+      }
+    }
+    return bestScore > 0 ? best : null;
+  }
+
+  /** 页面上已经输入的用户名（含分步登录的「账号已确认」页） */
+  function pageUsernameHint() {
+    for (const form of state.forms) {
+      if (form.userEl && form.userEl.value && String(form.userEl.value).trim()) {
+        return String(form.userEl.value).trim().toLowerCase();
+      }
+    }
+    // 分步登录的第二步：页面上只剩密码框，账号显示在某处文本里
+    const text = String((document.body && document.body.innerText) || '').slice(0, 3000).toLowerCase();
+    for (const entry of state.entries) {
+      const user = String(entry.username || '').trim().toLowerCase();
+      if (user && user.length >= 3 && text.indexOf(user) >= 0) return user;
+    }
+    return '';
+  }
+
+  /** 让与页面已输入账号一致的那条记录排在最前（下拉面板与自动填充都用这个顺序） */
+  function rankEntriesForPage(entries) {
+    const hint = pageUsernameHint();
+    if (!hint || entries.length < 2) return entries;
+    const match = entries.filter((entry) => String(entry.username || '').trim().toLowerCase() === hint);
+    if (!match.length) return entries;
+    return match.concat(entries.filter((entry) => match.indexOf(entry) < 0));
   }
 
   /* ------------------------------------------------------------------ *
@@ -715,7 +965,7 @@
    * ------------------------------------------------------------------ */
 
   function syncButtons() {
-    const forms = scanForms();
+    const forms = rankForms(scanForms());
     const reusedButtons = new Set();
     // 沿用旧对象上的按钮和“上一次填充”信息，避免重复记录
     for (const next of forms) {
@@ -886,6 +1136,8 @@
   function renderPanel() {
     if (!overlay) return;
     const ui = overlay;
+    // 面板打开时按当下页面上已输入的账号重新排序（用户可能刚改了用户名）
+    state.entries = rankEntriesForPage(state.entries);
     ui.panelList.textContent = '';
     for (const entry of state.entries) ui.panelList.appendChild(buildRow(entry));
     ui.panelSite.textContent = U.prettyHost(state.host || location.hostname);
@@ -1062,6 +1314,7 @@
     };
 
     tick();
+    learnSite(form);
 
     if (submit) {
       setTimeout(() => {
@@ -1102,6 +1355,7 @@
         if (state.dismissed) return;
         const target = reacquireForm(form);
         if (!target) return;
+        learnSite(target);
         fillForm(target, state.entries[0], false);
       }, AUTO_FILL_DELAY);
       state.dismissed = false;
@@ -1463,6 +1717,8 @@
 
     state.settings = Object.assign({}, state.settings, res.settings || {});
     state.entries = Array.isArray(res.entries) ? res.entries : [];
+    // 页面上已经填了账号（比如「先输账号 → 下一步」）时，把对应记录排到最前
+    state.entries = rankEntriesForPage(state.entries);
     state.host = res.host || location.hostname;
     state.configured = !!res.configured;
     state.locked = !!res.locked;
@@ -1486,6 +1742,9 @@
     // 上一次填充的重试计时器不该跨页继续跑（否则会往新页面的框里写旧账号）
     for (const timer of fillTimers) clearTimeout(timer);
     fillTimers.clear();
+    siteMemory.host = '';
+    siteMemory.learned = '';
+    loadSiteMemory();
     state.autoOpened = false;
     state.dismissed = false;
     state.refreshCount = 0;
@@ -1587,6 +1846,7 @@
   installPressGuard();
   registerCaptureHooks();
   watchNavigation();
+  loadSiteMemory();
   refresh();
 
   // 记录后立即刷新条目（例如撤销后）

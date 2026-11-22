@@ -188,6 +188,7 @@
       await S.clearRememberedKey().catch(() => undefined);
       return null;
     }
+    // 注：过期记录已在 store 里换成「expired 标记」，这里readRememberedKey() 返回 null
   }
 
   async function hydrateCache(record) {
@@ -228,7 +229,8 @@
         base.locked = true;
         base.vault = V.empty();
         await S.writeSessionKey(null);
-        await S.clearRememberedKey();
+        // 密钥解不开（远端换过主密码 / 文件损坏）：本机记住的密钥同样失效
+        await S.forgetRememberedKey();
       }
       return base;
     }
@@ -950,6 +952,60 @@
    * 主密码
    * ------------------------------------------------------------------ */
 
+  /**
+   * 「在本机记住」的当前状态。
+   *
+   * 开关打开 != 现在真的能免密：密钥可能还没写入（当前是锁定态）、
+   * 已经过期、或者被「锁定」清掉了。界面必须能看出「现在是什么状态、还剩几天」。
+   */
+  async function rememberedStatus(c) {
+    const settings = await S.getSettings();
+    const on = !!settings.rememberDevice;
+    const out = {
+      on,
+      days: Number(settings.rememberDeviceDays) || 0,
+      active: false, // 现在真的有可用的记住密钥
+      expiresAt: null,
+      savedAt: null,
+      remainingMs: null,
+      remainingDays: null,
+      expired: false,
+    };
+    let record = null;
+    try {
+      record = await S.readRememberedRecord();
+    } catch (err) {
+      record = null;
+    }
+    if (!record) return out;
+
+    out.savedAt = record.savedAt || null;
+    out.expiresAt = record.expiresAt || null;
+    if (record.expired || !record.key) {
+      out.expired = true;
+      return out;
+    }
+    if (!record.expiresAt) {
+      out.active = true; // 0 天 = 永久
+      return out;
+    }
+    const expiresAt = Date.parse(record.expiresAt);
+    if (!Number.isFinite(expiresAt)) {
+      out.expired = true;
+      return out;
+    }
+    const remainingMs = expiresAt - Date.now();
+    if (remainingMs <= 0) {
+      out.expired = true;
+      return out;
+    }
+    // 有记录且未过期，但密码库现在是锁定态：密钥还在，解锁时会被清掉/覆盖
+    out.active = !isLocked(c);
+    out.remainingMs = remainingMs;
+    out.remainingDays = Math.max(1, Math.ceil(remainingMs / 86400000));
+    return out;
+  }
+
   async function rememberKey(c, key) {
     c.key = key;
     c.locked = false;
@@ -1296,7 +1352,45 @@
         entries: locked ? 0 : c.vault.entries.length,
         kdfIterations: c.kdf ? c.kdf.iterations : null,
         notice: c.notice || '',
+        remember: await rememberedStatus(c),
       };
+    },
+
+    /** 单独查询 / 刷新「本机记住」状态（设置页与弹窗共用） */
+    async 'vault:rememberStatus'() {
+      const c = await getCache();
+      const settings = await S.getSettings();
+      return { ok: true, remember: await rememberedStatus(c), settings };
+    },
+
+    /**
+     * 站点识别线索（「智能识别」）。
+     * 只存选择器与页面状态关键词，不含账号密码；纯本地，不参与同步。
+     */
+    async 'site:memory'(message) {
+      const host = U.normalizeHost((message && message.host) || '');
+      const map = await S.readSiteMemory();
+      return { ok: true, host, memory: (host && map[host]) || null };
+    },
+
+    async 'site:learn'(message) {
+      const host = U.normalizeHost((message && message.host) || '');
+      if (!host) return { ok: false, error: '缺少站点' };
+      const patch = (message && message.memory) || {};
+      const clean = {
+        user: typeof patch.user === 'string' ? patch.user : '',
+        pass: typeof patch.pass === 'string' ? patch.pass : '',
+        markers: Array.isArray(patch.markers) ? patch.markers : [],
+      };
+      const map = await S.saveSiteMemory(host, clean);
+      return { ok: true, memory: map[host] || null };
+    },
+
+    async 'site:forget'(message) {
+      const host = U.normalizeHost((message && message.host) || '');
+      if (!host) return { ok: false, error: '缺少站点' };
+      await S.forgetSiteMemory(host);
+      return { ok: true };
     },
 
     async 'vault:clearNotice'() {
@@ -1415,6 +1509,7 @@
         locked,
         kdfIterations: c.kdf ? c.kdf.iterations : null,
         notice: c.notice || '',
+        remember: await rememberedStatus(c),
         vault: locked ? V.empty() : V.normalize(c.vault),
         settings: {
           autoSave: settings.autoSave,

@@ -1,6 +1,6 @@
 {
   "name": "pwdmg",
-  "version": "1.5.2",
+  "version": "1.6.0",
   "private": true,
   "description": "秦二密码管理：自动记录网站账号密码并同步到 WebDAV 的浏览器扩展（Chrome / Firefox）",
   "scripts": {

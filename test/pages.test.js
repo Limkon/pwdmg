@@ -922,3 +922,152 @@ test('弹窗：后台提示（如加密参数丢失）会在横幅里显示', { 
 
   dom.window.close();
 });
+
+/* ------------------------------------------------------------------ *
+ * 「在本机记住」的状态显示：必须能看出现在是什么状态、还剩几天
+ * ------------------------------------------------------------------ */
+
+function bootOptions(overrides) {
+  const { chrome } = makeChrome(overrides);
+  const dom = new JSDOM(read('src/options/options.html'), {
+    url: 'https://localhost/options.html',
+    pretendToBeVisual: true,
+    runScripts: 'outside-only',
+  });
+  const { window } = dom;
+  window.chrome = chrome;
+  window.browser = undefined;
+  window.eval(SHARED.api);
+  window.eval(SHARED.util);
+  window.eval(SHARED.vault);
+  window.eval(SHARED.webdav);
+  window.eval(SHARED.csv);
+  window.eval(SHARED.store);
+  window.eval(read('src/options/options.js'));
+  return dom;
+}
+
+function rememberStatus(overrides) {
+  return Object.assign(
+    {
+      on: true,
+      days: 7,
+      active: true,
+      expiresAt: new Date(Date.now() + 5 * 86400000).toISOString(),
+      savedAt: new Date(Date.now() - 2 * 86400000).toISOString(),
+      remainingMs: 5 * 86400000,
+      remainingDays: 5,
+      expired: false,
+    },
+    overrides || {}
+  );
+}
+
+test('设置页：本机记住显示「已生效 · 还剩 N 天」', { skip }, async () => {
+  const remember = rememberStatus();
+  const dom = bootOptions({
+    sendMessage: async (message) => {
+      if (message.type === 'vault:list') {
+        return {
+          ok: true,
+          configured: true,
+          dirty: false,
+          lastSyncAt: new Date().toISOString(),
+          lastError: null,
+          encrypted: true,
+          locked: false,
+          kdfIterations: 310000,
+          remember,
+          vault: VAULT,
+          settings: { rememberDevice: true, rememberDeviceDays: 7 },
+        };
+      }
+      return { ok: true };
+    },
+  });
+  const { window } = dom;
+
+  await until(() => window.document.querySelectorAll('#vault-list li').length === 3, '渲染密码库');
+  const status = window.document.getElementById('enc-remember-status');
+  assert.match(status.textContent, /已生效/);
+  assert.match(status.textContent, /还剩 5 天/);
+  assert.match(status.textContent, /共 7 天/);
+  assert.equal(status.dataset.state, 'ok');
+  assert.equal(window.document.getElementById('enc-remember').hidden, false);
+  dom.window.close();
+});
+
+test('设置页：本机记住的过期 / 未开启 / 永久三种状态都有明确文案', { skip }, async () => {
+  const cases = [
+    { remember: rememberStatus({ active: false, expired: true, remainingMs: null, remainingDays: null }), re: /已过期/ },
+    { remember: rememberStatus({ on: false, active: false, expiresAt: null }), re: /未开启/ },
+    { remember: rememberStatus({ expiresAt: null, remainingMs: null, remainingDays: null, days: 0 }), re: /永久/ },
+    { remember: rememberStatus({ active: false, expiresAt: null, remainingMs: null }), re: /尚未写入本机/ },
+  ];
+
+  for (const item of cases) {
+    const dom = bootOptions({
+      sendMessage: async (message) => {
+        if (message.type === 'vault:list') {
+          return {
+            ok: true,
+            configured: true,
+            dirty: false,
+            lastSyncAt: new Date().toISOString(),
+            lastError: null,
+            encrypted: true,
+            locked: true,
+            remember: item.remember,
+            vault: { version: 1, updatedAt: new Date().toISOString(), entries: [], tombstones: {} },
+            settings: { rememberDevice: !!item.remember.on, rememberDeviceDays: 7 },
+          };
+        }
+        return { ok: true };
+      },
+    });
+    const { window } = dom;
+    await until(() => /状态：/.test(window.document.getElementById('enc-remember-status').textContent), '渲染状态');
+    assert.match(window.document.getElementById('enc-remember-status').textContent, item.re);
+    dom.window.close();
+  }
+});
+
+test('弹窗：状态栏显示「本机已记住 · 还剩 N 天」', { skip }, async () => {
+  const remember = rememberStatus({ remainingDays: 3, remainingMs: 3 * 86400000 });
+  const vaultList = {
+    ok: true,
+    configured: true,
+    dirty: false,
+    lastSyncAt: new Date().toISOString(),
+    lastError: null,
+    encrypted: true,
+    locked: true,
+    remember,
+    vault: VAULT,
+  };
+  const { chrome } = makeChrome({
+    sendMessage: async (message) => {
+      if (message.type === 'vault:list') return vaultList;
+      return { ok: true };
+    },
+  });
+  const dom = new JSDOM(read('src/popup/popup.html'), {
+    url: 'https://localhost/popup.html',
+    pretendToBeVisual: true,
+    runScripts: 'outside-only',
+  });
+  const { window } = dom;
+  window.chrome = chrome;
+  window.browser = undefined;
+  window.close = () => undefined;
+  window.eval(SHARED.api);
+  window.eval(SHARED.util);
+  window.eval(SHARED.vault);
+  window.eval(read('src/popup/popup.js'));
+
+  await until(() => /本机已记住/.test(window.document.getElementById('status').textContent), '状态栏显示记住信息');
+  const text = window.document.getElementById('status').textContent;
+  assert.match(text, /已加密 · 未解锁/);
+  assert.match(text, /还剩 3 天/);
+  dom.window.close();
+});

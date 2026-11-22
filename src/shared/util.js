@@ -116,6 +116,23 @@
     return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
   }
 
+  /**
+   * 把「本机记住」的剩余时间说成人话：
+   *   null                     → 永久（0 天）
+   *   < 1 小时                 → 「不到 1 小时」
+   *   其它                     → 「N 天」「N 小时」
+   */
+  function formatRemaining(ms) {
+    if (ms == null) return '';
+    const n = Number(ms);
+    if (!Number.isFinite(n)) return '';
+    if (n <= 0) return '已过期';
+    const hour = 3600000;
+    if (n < hour) return '不到 1 小时';
+    if (n < 86400000) return Math.max(1, Math.round(n / hour)) + ' 小时';
+    return Math.ceil(n / 86400000) + ' 天';
+  }
+
   function escapeHtml(text) {
     return String(text == null ? '' : text).replace(/[&<>"']/g, (ch) => {
       return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch];
@@ -182,6 +199,7 @@
     firstLetter,
     clamp,
     formatRelativeTime,
+    formatRemaining,
     escapeHtml,
     debounce,
     withTimeout,
