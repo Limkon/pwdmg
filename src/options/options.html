@@ -1,0 +1,239 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>秦二密码管理 · 设置</title>
+    <link rel="stylesheet" href="options.css" />
+  </head>
+  <body>
+    <header class="page-head">
+      <div class="brand">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <circle cx="7.5" cy="7.5" r="4" />
+          <path d="M10.4 10.4L20 20" />
+          <path d="M16.6 16.6l-2.2 2.2" />
+          <path d="M19.4 19.4l-2.2 2.2" />
+        </svg>
+        <span>秦二密码管理</span>
+      </div>
+      <p class="tagline">自动记录网站账号密码，同步到你自己的 WebDAV，下次访问自动提示并填写。</p>
+    </header>
+
+    <main>
+      <section class="card">
+        <h2>1 · WebDAV 连接</h2>
+        <p class="hint">
+          填写指向一个 JSON 文件的完整地址，插件会在该位置读写密码库。例如 Nextcloud：
+          <code>https://cloud.example.com/remote.php/dav/files/用户名/pwdmg/vault.json</code>；
+          坚果云：<code>https://dav.jianguoyun.com/dav/pwdmg/vault.json</code>。
+        </p>
+
+        <div class="grid">
+          <label class="span2">
+            <span>文件地址</span>
+            <input id="wd-url" type="url" spellcheck="false" placeholder="https://dav.example.com/dav/pwdmg/vault.json" />
+          </label>
+
+          <label>
+            <span>认证方式</span>
+            <select id="wd-auth">
+              <option value="basic">用户名 + 密码（Basic）</option>
+              <option value="bearer">访问令牌（Bearer）</option>
+              <option value="none">无认证</option>
+            </select>
+          </label>
+
+          <label class="span2" data-auth="basic">
+            <span>用户名</span>
+            <input id="wd-user" type="text" spellcheck="false" autocomplete="username" />
+          </label>
+
+          <label class="span2" data-auth="basic">
+            <span>密码 / 应用专用密码</span>
+            <input id="wd-pass" type="password" autocomplete="current-password" />
+          </label>
+
+          <label class="span2" data-auth="bearer">
+            <span>访问令牌（Authorization: Bearer）</span>
+            <input id="wd-token" type="password" autocomplete="off" />
+          </label>
+
+          <label class="check span2">
+            <input id="wd-createdirs" type="checkbox" />
+            <span>自动创建缺失的目录（发送 MKCOL 请求）</span>
+          </label>
+        </div>
+
+        <div class="row">
+          <button id="save-conn" class="btn primary" type="button">保存并测试连接</button>
+          <span id="conn-result" class="result"></span>
+        </div>
+
+        <p class="hint warn">
+          ⚠️ 密码库以<b>明文 JSON</b> 保存，任何能访问该文件的人都能看到全部密码。请务必使用 HTTPS，
+          并尽量使用「应用专用密码」或访问令牌，不要使用主账号密码。
+        </p>
+      </section>
+
+      <section class="card">
+        <h2>2 · 主密码加密（AES-GCM）</h2>
+        <p class="hint">
+          启用后，WebDAV 上的密码库文件和浏览器本地缓存都会用主密码派生的 AES-GCM 密钥加密。
+          主密码不会上传、也不会被保存，<b>忘记后无法找回</b>（只能靠导出的明文备份）。
+        </p>
+        <p id="enc-status" class="result">检查中…</p>
+
+        <div id="enc-enable" hidden>
+          <div class="grid">
+            <label>
+              <span>设置主密码（至少 8 位）</span>
+              <input id="enc-pass1" type="password" autocomplete="new-password" placeholder="主密码" />
+            </label>
+            <label>
+              <span>再次输入</span>
+              <input id="enc-pass2" type="password" autocomplete="new-password" placeholder="重复主密码" />
+            </label>
+          </div>
+          <div class="row">
+            <button id="enc-enable-btn" class="btn primary" type="button">启用加密</button>
+            <span id="enc-enable-msg" class="result"></span>
+          </div>
+        </div>
+
+        <div id="enc-unlock" hidden>
+          <div class="grid">
+            <label class="span2">
+              <span>主密码</span>
+              <input id="enc-unlock-pass" type="password" autocomplete="current-password" placeholder="输入主密码解锁" />
+            </label>
+          </div>
+          <div class="row">
+            <button id="enc-unlock-btn" class="btn primary" type="button">解锁</button>
+            <span id="enc-unlock-msg" class="result"></span>
+          </div>
+        </div>
+
+        <div id="enc-manage" hidden>
+          <div class="row wrap">
+            <button id="enc-lock-btn" class="btn" type="button">锁定</button>
+            <button id="enc-disable-btn" class="btn ghost" type="button">关闭加密（改为明文）</button>
+          </div>
+          <details class="adv">
+            <summary>修改主密码</summary>
+            <div class="grid">
+              <label>
+                <span>当前主密码</span>
+                <input id="enc-old" type="password" autocomplete="current-password" />
+              </label>
+              <label>
+                <span>新主密码（至少 8 位）</span>
+                <input id="enc-new" type="password" autocomplete="new-password" />
+              </label>
+            </div>
+            <div class="row">
+              <button id="enc-change-btn" class="btn primary" type="button">修改主密码</button>
+              <span id="enc-change-msg" class="result"></span>
+            </div>
+          </details>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>3 · 记录与填充</h2>
+        <label class="check">
+          <input id="opt-autosave" type="checkbox" />
+          <span><b>自动记录</b>：提交登录表单时保存用户名和密码</span>
+        </label>
+        <label class="check">
+          <input id="opt-autoprompt" type="checkbox" />
+          <span><b>自动提示</b>：打开登录页时显示该站点匹配的账号</span>
+        </label>
+        <label class="check">
+          <input id="opt-autoopen" type="checkbox" />
+          <span><b>自动展开面板</b>：页面加载后在密码框下方弹出账号列表</span>
+        </label>
+        <label class="check">
+          <input id="opt-autofill" type="checkbox" />
+          <span><b>自动填充</b>：只有 1 个匹配账号且密码框为空时直接填入</span>
+        </label>
+        <label class="check">
+          <input id="opt-confirm-change" type="checkbox" />
+          <span><b>密码变化时先确认</b>：同一站点同一账号检测到新密码时先询问再更新</span>
+        </label>
+
+        <div class="grid">
+          <label>
+            <span>定时同步间隔（分钟）</span>
+            <input id="opt-interval" type="number" min="1" max="1440" step="1" />
+          </label>
+        </div>
+        <p class="hint" id="behavior-hint">修改后会自动保存。</p>
+      </section>
+
+      <section class="card">
+        <h2>4 · 同步与数据</h2>
+        <div class="row wrap">
+          <button id="btn-sync" class="btn" type="button">立即同步</button>
+          <button id="btn-pull" class="btn ghost" type="button">以远端覆盖本地</button>
+          <button id="btn-export" class="btn ghost" type="button">导出 JSON</button>
+          <label class="btn ghost file">
+            导入 JSON / CSV
+            <input id="file-import" type="file" accept=".json,.csv,application/json,text/csv" hidden />
+          </label>
+        </div>
+        <label class="check">
+          <input id="import-overwrite" type="checkbox" />
+          <span><b>导入时覆盖已有密码</b>：默认只新增，已存在的账号会跳过（CSV 导入时生效）</span>
+        </label>
+        <label class="check">
+          <input id="opt-noifmatch" type="checkbox" />
+          <span
+            ><b>兼容模式：不使用 If-Match</b>：服务器 ETag 不可靠（弱校验符 / 每次都变）时勾选，
+            否则同步会一直报「服务器拒绝了条件写入（HTTP 412）」。多设备同时写入时以最后一次为准。</span
+          >
+        </label>
+        <p id="sync-status" class="result"></p>
+        <p id="notice-bar" class="result" hidden>
+          <span id="notice-text"></span>
+          <button id="notice-dismiss" class="btn ghost" type="button">知道了</button>
+        </p>
+        <p id="vault-meta" class="hint"></p>
+      </section>
+
+      <section class="card">
+        <h2>5 · 备份与恢复</h2>
+        <div class="row wrap">
+          <button id="btn-push" class="btn ghost" type="button">以本地覆盖远端</button>
+          <button id="btn-history" class="btn ghost" type="button">刷新快照</button>
+          <button id="btn-clear-history" class="btn ghost" type="button">清空快照</button>
+        </div>
+        <p class="hint">
+          每次覆盖远端前都会把上一份文件留在本地；加密库存的是密文信封。最多保留 5 份，远端文件损坏或误导入时可从这里恢复。
+        </p>
+        <ul id="history-list" class="history"></ul>
+        <p id="history-empty" class="hint">还没有快照：发生第一次上传后才会生成。</p>
+        <p id="export-hint" class="hint"></p>
+      </section>
+
+      <section class="card">
+        <h2>6 · 密码库 <span id="vault-count" class="pill"></span></h2>
+        <input id="search" class="search" type="search" placeholder="搜索网站或用户名…" />
+        <ul id="vault-list" class="vault"></ul>
+        <p id="vault-empty" class="hint" hidden>密码库里还没有账号。</p>
+      </section>
+
+      <footer class="page-foot">
+        <span>秦二密码管理 · 数据只保存在本地缓存与你自己的 WebDAV 上，没有第三方服务器。</span>
+      </footer>
+    </main>
+
+    <script src="../shared/api.js"></script>
+    <script src="../shared/util.js"></script>
+    <script src="../shared/vault.js"></script>
+    <script src="../shared/webdav.js"></script>
+    <script src="../shared/csv.js"></script>
+    <script src="../shared/store.js"></script>
+    <script src="options.js"></script>
+  </body>
+</html>

@@ -1,0 +1,69 @@
+{
+  "manifest_version": 3,
+  "name": "秦二密码管理",
+  "short_name": "秦二密码",
+  "version": "1.4.2",
+  "description": "自动记录网站账号密码并同步到你自己的 WebDAV，下次访问自动提示与填充。",
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "permissions": [
+    "storage",
+    "activeTab",
+    "scripting",
+    "alarms"
+  ],
+  "host_permissions": [
+    "http://*/*",
+    "https://*/*"
+  ],
+  "background": {
+    "scripts": [
+      "src/shared/api.js",
+      "src/shared/util.js",
+      "src/shared/vault.js",
+      "src/shared/webdav.js",
+      "src/shared/crypto.js",
+      "src/shared/store.js",
+      "src/background.js"
+    ]
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "http://*/*",
+        "https://*/*"
+      ],
+      "js": [
+        "src/shared/api.js",
+        "src/shared/util.js",
+        "src/content/content.js"
+      ],
+      "run_at": "document_idle",
+      "all_frames": true
+    }
+  ],
+  "action": {
+    "default_title": "秦二密码管理 · WebDAV 同步",
+    "default_popup": "src/popup/popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "options_ui": {
+    "page": "src/options/options.html",
+    "open_in_tab": true
+  },
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "pwdmg@limkco.dev",
+      "strict_min_version": "115.0"
+    }
+  }
+}

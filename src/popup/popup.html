@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>秦二密码管理</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <header class="top">
+      <div class="brand">
+        <svg class="logo" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <circle cx="7.5" cy="7.5" r="4" />
+          <path d="M10.4 10.4L20 20" />
+          <path d="M16.6 16.6l-2.2 2.2" />
+          <path d="M19.4 19.4l-2.2 2.2" />
+        </svg>
+        <span>秦二密码</span>
+      </div>
+      <div class="top-actions">
+        <span id="lock-badge" class="lock-badge" hidden title="密码库已加密">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <rect x="4" y="10" width="16" height="10" rx="2" />
+            <path d="M8 10V7a4 4 0 0 1 8 0v3" />
+          </svg>
+        </span>
+        <button id="sync-btn" class="icon-btn" type="button" title="立即同步" aria-label="立即同步">⟳</button>
+      </div>
+    </header>
+
+    <div id="banner" class="banner" hidden>
+      <span id="banner-text"></span>
+      <button id="banner-action" class="link" type="button" hidden>前往设置</button>
+    </div>
+
+    <section id="lock-box" class="card lockbox" hidden>
+      <div class="lock-title">密码库已加密</div>
+      <p class="muted small">输入主密码解锁。解锁状态只在当前浏览器会话内有效。</p>
+      <input id="unlock-password" class="pw-input" type="password" placeholder="主密码" autocomplete="current-password" />
+      <div class="row end">
+        <button id="unlock-btn" class="btn primary" type="button">解锁</button>
+      </div>
+      <p id="lock-error" class="error" hidden></p>
+    </section>
+
+    <section id="site-card" class="card">
+      <div class="site-row">
+        <div class="site">
+          <div id="site-host" class="site-host">—</div>
+          <div id="site-sub" class="site-sub"></div>
+        </div>
+        <span id="count" class="pill" hidden></span>
+      </div>
+
+      <ul id="entries" class="entries" hidden></ul>
+
+      <div id="empty" class="empty" hidden>
+        <p>这个站点还没有保存的账号。</p>
+        <p class="muted">正常登录一次，秦二密码管理会自动记录并同步到 WebDAV。</p>
+      </div>
+    </section>
+
+    <button id="add-toggle" class="btn ghost full" type="button">＋ 手动添加账号</button>
+
+    <form id="add-form" class="card form" hidden>
+      <label>
+        <span>网站地址</span>
+        <input id="f-url" type="text" spellcheck="false" placeholder="https://example.com" />
+      </label>
+      <label>
+        <span>用户名</span>
+        <input id="f-username" type="text" spellcheck="false" autocomplete="off" placeholder="用户名 / 邮箱" />
+      </label>
+      <label>
+        <span>密码</span>
+        <input id="f-password" type="password" autocomplete="new-password" placeholder="密码" />
+      </label>
+      <div class="row">
+        <button id="add-cancel" class="btn ghost" type="button">取消</button>
+        <button class="btn primary" type="submit">保存</button>
+      </div>
+      <p id="add-error" class="error" hidden></p>
+    </form>
+
+    <footer class="bottom">
+      <div id="status" class="status">加载中…</div>
+      <div class="bottom-actions">
+        <button id="lock-btn" class="link" type="button" hidden>锁定</button>
+        <button id="options-btn" class="link" type="button">设置</button>
+      </div>
+    </footer>
+
+    <script src="../shared/api.js"></script>
+    <script src="../shared/util.js"></script>
+    <script src="../shared/vault.js"></script>
+    <script src="popup.js"></script>
+  </body>
+</html>
