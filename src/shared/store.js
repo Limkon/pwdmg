@@ -42,7 +42,8 @@
     confirmPasswordChange: true,
     syncIntervalMin: 15,
     lastExportAt: '',
-    rememberDeviceDays: 0,
+    rememberDevice: false,
+    rememberDeviceDays: 7,
   };
 
   function clampNumber(value, min, max, fallback) {
@@ -69,7 +70,8 @@
       confirmPasswordChange: !!s.confirmPasswordChange,
       lastExportAt: typeof s.lastExportAt === 'string' ? s.lastExportAt : '',
       syncIntervalMin: clampNumber(s.syncIntervalMin, 1, 1440, 15),
-      rememberDeviceDays: clampNumber(s.rememberDeviceDays, 0, 365, 0),
+      rememberDevice: s.rememberDevice !== undefined ? !!s.rememberDevice : Number(s.rememberDeviceDays) > 0,
+      rememberDeviceDays: clampNumber(s.rememberDeviceDays, 0, 365, 7),
     };
   }
 
@@ -222,7 +224,8 @@
     try {
       const data = await api.storage.local.get(REMEMBERED_KEY_KEY);
       const entry = data && data[REMEMBERED_KEY_KEY];
-      if (!entry || !entry.key || !entry.expiresAt) return null;
+      if (!entry || !entry.key) return null;
+      if (!entry.expiresAt) return entry.key; // 0 天 = 永久（直到手动清除）
       const expiresAt = Date.parse(entry.expiresAt);
       if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
         await clearRememberedKey();
@@ -236,8 +239,11 @@
 
   async function writeRememberedKey(keyBase64, days) {
     if (!api) return;
-    const n = Math.max(1, Math.floor(Number(days) || 1));
-    const expiresAt = new Date(Date.now() + n * 24 * 60 * 60 * 1000).toISOString();
+    const n = Math.floor(Number(days));
+    // days <= 0 表示永久（直到手动清除），不写过期时间
+    const expiresAt = Number.isFinite(n) && n > 0
+      ? new Date(Date.now() + n * 24 * 60 * 60 * 1000).toISOString()
+      : null;
     await api.storage.local.set({ [REMEMBERED_KEY_KEY]: { key: String(keyBase64 || ''), expiresAt } });
   }
 

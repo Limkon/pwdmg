@@ -157,6 +157,25 @@ label.check b {
   font-weight: 650;
 }
 
+.remember-days {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.remember-days input[type="number"] {
+  width: 76px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+}
+
 .row {
   display: flex;
   align-items: center;

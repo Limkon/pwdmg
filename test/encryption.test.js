@@ -393,5 +393,29 @@ test('记住本机：关闭开关后立即清除本机记住的密钥', async (t
   const off = await fake.send({ type: 'vault:rememberDevice', remember: false });
   assert.equal(off.ok, true);
   assert.equal(fake.store.get('rememberedKey'), undefined);
-  assert.equal(off.settings.rememberDeviceDays, 0);
+  assert.equal(off.settings.rememberDevice, false);
+});
+
+test('记住本机：0 天 = 永久有效（直到手动锁定），过期不影响', async (t) => {
+  const { server, fake } = await setup(t);
+  await seedCredential(fake, server, 'alice', 'pw-1');
+  await fake.send({ type: 'vault:enableEncryption', password: MASTER });
+
+  const on = await fake.send({ type: 'vault:rememberDevice', remember: true, days: 0 });
+  assert.equal(on.ok, true);
+  assert.equal(on.settings.rememberDevice, true);
+  assert.equal(on.settings.rememberDeviceDays, 0);
+  const rec = fake.store.get('rememberedKey');
+  assert.ok(rec && rec.key, '永久记住时也应写入密钥');
+  assert.equal(rec.expiresAt, null, '0 天 = 不设过期时间');
+
+  // 模拟浏览器重启：即使「过期」也能自动解锁
+  const fresh = loadBackground({ store: fake.store });
+  const list = await fresh.send({ type: 'vault:list' });
+  assert.equal(list.locked, false);
+  assert.equal(list.vault.entries.length, 1);
+
+  // 手动锁定后，开启的记忆被清除
+  await fresh.send({ type: 'vault:lock' });
+  assert.equal(fresh.store.get('rememberedKey'), undefined);
 });

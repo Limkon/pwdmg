@@ -87,9 +87,13 @@
         <div id="enc-remember" hidden>
           <label class="check">
             <input id="enc-remember-chk" type="checkbox" />
-            <span><b>在本机记住 7 天</b>：浏览器重启后免输入主密码</span>
+            <span><b>在本机记住</b>：浏览器重启后免输入主密码</span>
           </label>
-          <p class="hint">仅保存从主密码派生的 AES 密钥（主密码永不存储）。锁定、过期或关闭开关后会立即清除本机的记忆。</p>
+          <label class="remember-days">
+            <span>有效期（天）</span>
+            <input id="enc-remember-days" type="number" min="0" max="365" step="1" value="7" />
+          </label>
+          <p class="hint">默认 7 天，每次解锁刷新有效期；<b>0 表示永久</b>（直到手动锁定或关闭开关）。仅保存从主密码派生的 AES 密钥，主密码永不存储。</p>
           <span id="enc-remember-msg" class="result"></span>
         </div>
 

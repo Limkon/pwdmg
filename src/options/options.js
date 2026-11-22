@@ -170,7 +170,9 @@
     el('opt-confirm-change').checked = !!settings.confirmPasswordChange;
     el('opt-interval').value = settings.syncIntervalMin || 15;
     el('opt-noifmatch').checked = !!settings.noIfMatch;
-    el('enc-remember-chk').checked = (Number(settings.rememberDeviceDays) || 0) > 0;
+    el('enc-remember-chk').checked = !!settings.rememberDevice;
+    el('enc-remember-days').value = String(Number(settings.rememberDeviceDays) || 7);
+    el('enc-remember-days').disabled = !settings.rememberDevice;
   }
 
   function collectBehavior() {
@@ -820,16 +822,27 @@
   el('btn-clear-history').addEventListener('click', clearHistory);
   el('enc-enable-btn').addEventListener('click', enableEncryption);
   el('enc-unlock-btn').addEventListener('click', unlockEncryption);
-  el('enc-remember-chk').addEventListener('change', async () => {
+  async function applyRememberDevice() {
     const remember = !!el('enc-remember-chk').checked;
-    const res = await sendMessage({ type: 'vault:rememberDevice', remember, days: remember ? 7 : 0 });
+    const rawDays = Number(el('enc-remember-days').value);
+    const days = Number.isFinite(rawDays) ? rawDays : 7;
+    el('enc-remember-days').disabled = !remember;
+    const res = await sendMessage({ type: 'vault:rememberDevice', remember, days });
     if (res && res.ok) {
       state.settings = res.settings;
-      setMsg('enc-remember-msg', remember ? '已开启：本机 7 天内免输入主密码' : '已关闭：下次打开就得重新输入主密码', 'ok');
+      const d = Number(res.settings.rememberDeviceDays) || 0;
+      const text = !remember
+        ? '已关闭：下次打开就得重新输入主密码'
+        : d === 0
+          ? '已开启：本机永久记住（直到手动锁定）'
+          : `已开启：本机 ${d} 天内免输入主密码`;
+      setMsg('enc-remember-msg', text, 'ok');
     } else {
       setMsg('enc-remember-msg', (res && res.error) || '保存失败', 'error');
     }
-  });
+  }
+  el('enc-remember-chk').addEventListener('change', applyRememberDevice);
+  el('enc-remember-days').addEventListener('change', applyRememberDevice);
   el('enc-lock-btn').addEventListener('click', lockEncryption);
   el('enc-disable-btn').addEventListener('click', disableEncryption);
   el('enc-change-btn').addEventListener('click', changeMasterPassword);

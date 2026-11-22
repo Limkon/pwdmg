@@ -957,9 +957,10 @@
     await S.writeSessionKey(raw);
     try {
       const settings = await S.getSettings();
-      const days = Number(settings && settings.rememberDeviceDays) || 0;
-      if (days > 0) {
-        await S.writeRememberedKey(raw, days);
+      if (settings && settings.rememberDevice) {
+        const days = Number(settings.rememberDeviceDays);
+        // days <= 0 表示永久（直到手动锁定）
+        await S.writeRememberedKey(raw, Number.isFinite(days) ? days : 7);
       } else {
         await S.clearRememberedKey();
       }
@@ -1633,14 +1634,15 @@
 
     async 'vault:rememberDevice'(message) {
       const remember = !!(message && message.remember);
-      const days = remember ? 7 : 0;
-      const settings = await S.saveSettings({ rememberDeviceDays: days });
-      if (!days) {
+      const daysRaw = Number(message && message.days);
+      const days = remember && Number.isFinite(daysRaw) && daysRaw >= 0 ? Math.min(Math.round(daysRaw), 365) : 7;
+      const settings = await S.saveSettings({ rememberDevice: remember, rememberDeviceDays: days });
+      if (!remember) {
         await S.clearRememberedKey();
         return { ok: true, settings };
       }
       // 当前处于解锁状态时立即写入本机记住的密钥，
-      // 否则下次输入主密码解锁时会写入（滚动 7 天有效期）。
+      // 否则下次输入主密码解锁时会写入（滚动有效期，0 = 永久）。
       const c = await getCache();
       const key = c && c.key ? c.key : await getKey(c);
       if (key && !isLocked(c)) {
