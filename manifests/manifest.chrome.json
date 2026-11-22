@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "秦二密码管理",
   "short_name": "秦二密码",
-  "version": "1.5.0",
+  "version": "1.5.1",
   "description": "自动记录网站账号密码并同步到你自己的 WebDAV，下次访问自动提示与填充。",
   "minimum_chrome_version": "102",
   "icons": {
