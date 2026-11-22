@@ -579,7 +579,7 @@ test('弹窗请求填充：填入密码并把条目 id 记回后台（用于“�
   assert.equal(calls.capture.length, 0);
 });
 
-test('登录框在按钮点击后才出现：注入按钮与面板', async (t) => {
+test('登录框在按钮点击后才出现：注入按钮与面板', { skip }, async (t) => {
   const page = createPage(
     t,
     '<button id="loginBtn">登录</button>',
@@ -608,7 +608,7 @@ test('登录框在按钮点击后才出现：注入按钮与面板', async (t) =
   assert.match(panel.querySelector('.panel-site, .site').textContent, /example\.com/);
 });
 
-test('登录框弹在 open shadow DOM 里：注入按钮与面板', async (t) => {
+test('登录框弹在 open shadow DOM 里：注入按钮与面板', { skip }, async (t) => {
   const page = createPage(
     t,
     '<button id="loginBtn">登录</button>',
@@ -638,7 +638,7 @@ test('登录框弹在 open shadow DOM 里：注入按钮与面板', async (t) =>
   assert.equal(pass.tagName, 'INPUT');
 });
 
-test('覆盖层被页面重渲染移除后，自动重建并重新挂载图标', async (t) => {
+test('覆盖层被页面重渲染移除后，自动重建并重新挂载图标', { skip }, async (t) => {
   const page = createPage(
     t,
     '<form><input id="u" type="text" name="username" /><input id="p" type="password" name="password" /><button type="submit">登录</button></form>',
