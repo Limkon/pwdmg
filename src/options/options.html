@@ -84,6 +84,15 @@
         </p>
         <p id="enc-status" class="result">检查中…</p>
 
+        <div id="enc-remember" hidden>
+          <label class="check">
+            <input id="enc-remember-chk" type="checkbox" />
+            <span><b>在本机记住 7 天</b>：浏览器重启后免输入主密码</span>
+          </label>
+          <p class="hint">仅保存从主密码派生的 AES 密钥（主密码永不存储）。锁定、过期或关闭开关后会立即清除本机的记忆。</p>
+          <span id="enc-remember-msg" class="result"></span>
+        </div>
+
         <div id="enc-enable" hidden>
           <div class="grid">
             <label>

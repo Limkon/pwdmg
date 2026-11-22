@@ -42,6 +42,7 @@
     confirmPasswordChange: true,
     syncIntervalMin: 15,
     lastExportAt: '',
+    rememberDeviceDays: 0,
   };
 
   function clampNumber(value, min, max, fallback) {
@@ -68,6 +69,7 @@
       confirmPasswordChange: !!s.confirmPasswordChange,
       lastExportAt: typeof s.lastExportAt === 'string' ? s.lastExportAt : '',
       syncIntervalMin: clampNumber(s.syncIntervalMin, 1, 1440, 15),
+      rememberDeviceDays: clampNumber(s.rememberDeviceDays, 0, 365, 0),
     };
   }
 
@@ -206,6 +208,48 @@
     return writeSession(SESSION_KEY, value || null);
   }
 
+  /* ---------------------------------------------------------------- *
+   * 本机记住的解锁密钥（「记住本机」开关）
+   *
+   * 只保存从主密码派生出的 AES-GCM 原始密钥（base64）+ 过期时间。
+   * 主密码本身永不写入、永不落盘；过期/清理后必须重新输入主密码。
+   * ---------------------------------------------------------------- */
+
+  const REMEMBERED_KEY_KEY = 'rememberedKey';
+
+  async function readRememberedKey() {
+    if (!api) return null;
+    try {
+      const data = await api.storage.local.get(REMEMBERED_KEY_KEY);
+      const entry = data && data[REMEMBERED_KEY_KEY];
+      if (!entry || !entry.key || !entry.expiresAt) return null;
+      const expiresAt = Date.parse(entry.expiresAt);
+      if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
+        await clearRememberedKey();
+        return null;
+      }
+      return entry.key;
+    } catch (err) {
+      return null;
+    }
+  }
+
+  async function writeRememberedKey(keyBase64, days) {
+    if (!api) return;
+    const n = Math.max(1, Math.floor(Number(days) || 1));
+    const expiresAt = new Date(Date.now() + n * 24 * 60 * 60 * 1000).toISOString();
+    await api.storage.local.set({ [REMEMBERED_KEY_KEY]: { key: String(keyBase64 || ''), expiresAt } });
+  }
+
+  async function clearRememberedKey() {
+    if (!api) return;
+    try {
+      await api.storage.local.remove(REMEMBERED_KEY_KEY);
+    } catch (err) {
+      /* 忽略 */
+    }
+  }
+
   return {
     SETTINGS_KEY,
     CACHE_KEY,
@@ -226,5 +270,9 @@
     HISTORY_KEY,
     readSessionKey,
     writeSessionKey,
+    REMEMBERED_KEY_KEY,
+    readRememberedKey,
+    writeRememberedKey,
+    clearRememberedKey,
   };
 });

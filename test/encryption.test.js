@@ -329,3 +329,69 @@ test('解锁 / 锁定后通知已打开的页面重新读取状态', async (t) =
   assert.equal(fake.tabsSent.filter((m) => m.type === 'content:rescan').length >= 3, true);
   assert.ok(fake.tabsSent.every((m) => m.tabId === 1 || m.tabId === 2));
 });
+
+test('记住本机：浏览器重启免输入主密码，锁定后被清除', async (t) => {
+  const { server, fake } = await setup(t);
+  await seedCredential(fake, server, 'alice', 'pw-1');
+  await fake.send({ type: 'vault:enableEncryption', password: MASTER });
+
+  const remember = await fake.send({ type: 'vault:rememberDevice', remember: true, days: 7 });
+  assert.equal(remember.ok, true);
+  const rec = fake.store.get('rememberedKey');
+  assert.ok(rec && rec.key, '本机记住的密钥应写入存储');
+  assert.ok(Date.parse(rec.expiresAt) > Date.now() + 6 * 24 * 3600 * 1000, '有效期约 7 天');
+
+  // 模拟浏览器重启：session 与内存缓存全部丢失
+  const fresh = loadBackground({ store: fake.store });
+  const before = await fresh.send({ type: 'vault:list' });
+  assert.equal(before.locked, false, '重启后应自动解锁');
+  assert.equal(before.encrypted, true);
+  assert.equal(before.vault.entries.length, 1);
+  assert.equal(before.vault.entries[0].password, 'pw-1');
+
+  // 锁定后本机记住的密钥被清除，且重启后回到锁定态
+  const locked = await fresh.send({ type: 'vault:lock' });
+  assert.equal(locked.ok, true);
+  assert.equal(locked.locked, true);
+  assert.equal(fresh.store.get('rememberedKey'), undefined);
+
+  const fresh2 = loadBackground({ store: fresh.store });
+  const after = await fresh2.send({ type: 'vault:list' });
+  assert.equal(after.locked, true, '锁定后重启应回到锁定态');
+});
+
+test('记住本机：已过期的密钥被拒绝，按锁定处理', async (t) => {
+  const { server, fake } = await setup(t);
+  await seedCredential(fake, server, 'alice', 'pw-1');
+  await fake.send({ type: 'vault:enableEncryption', password: MASTER });
+  const remember = await fake.send({ type: 'vault:rememberDevice', remember: true, days: 7 });
+  assert.equal(remember.ok, true);
+
+  // 把有效期改成已过期再模拟重启
+  const rec = fake.store.get('rememberedKey');
+  rec.expiresAt = new Date(Date.now() - 1000).toISOString();
+  fake.store.set('rememberedKey', rec);
+
+  const fresh = loadBackground({ store: fake.store });
+  const list = await fresh.send({ type: 'vault:list' });
+  assert.equal(list.locked, true, '过期密钥不能自动解锁');
+  assert.equal(fresh.store.get('rememberedKey'), undefined, '过期密钥应被清除');
+
+  const wrong = await fresh.send({ type: 'vault:unlock', password: 'not-the-password' });
+  assert.equal(wrong.ok, false);
+  assert.equal(wrong.code, 'bad-password');
+});
+
+test('记住本机：关闭开关后立即清除本机记住的密钥', async (t) => {
+  const { server, fake } = await setup(t);
+  await seedCredential(fake, server, 'alice', 'pw-1');
+  await fake.send({ type: 'vault:enableEncryption', password: MASTER });
+
+  await fake.send({ type: 'vault:rememberDevice', remember: true, days: 7 });
+  assert.ok(fake.store.get('rememberedKey'));
+
+  const off = await fake.send({ type: 'vault:rememberDevice', remember: false });
+  assert.equal(off.ok, true);
+  assert.equal(fake.store.get('rememberedKey'), undefined);
+  assert.equal(off.settings.rememberDeviceDays, 0);
+});

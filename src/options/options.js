@@ -170,6 +170,7 @@
     el('opt-confirm-change').checked = !!settings.confirmPasswordChange;
     el('opt-interval').value = settings.syncIntervalMin || 15;
     el('opt-noifmatch').checked = !!settings.noIfMatch;
+    el('enc-remember-chk').checked = (Number(settings.rememberDeviceDays) || 0) > 0;
   }
 
   function collectBehavior() {
@@ -219,6 +220,7 @@
     el('enc-enable').hidden = encrypted;
     el('enc-unlock').hidden = !(encrypted && locked);
     el('enc-manage').hidden = !(encrypted && !locked);
+    el('enc-remember').hidden = !encrypted;
 
     if (!encrypted) {
       setResult(node, '当前未启用加密：密码库以明文 JSON 保存。', 'warn');
@@ -818,6 +820,16 @@
   el('btn-clear-history').addEventListener('click', clearHistory);
   el('enc-enable-btn').addEventListener('click', enableEncryption);
   el('enc-unlock-btn').addEventListener('click', unlockEncryption);
+  el('enc-remember-chk').addEventListener('change', async () => {
+    const remember = !!el('enc-remember-chk').checked;
+    const res = await sendMessage({ type: 'vault:rememberDevice', remember, days: remember ? 7 : 0 });
+    if (res && res.ok) {
+      state.settings = res.settings;
+      setMsg('enc-remember-msg', remember ? '已开启：本机 7 天内免输入主密码' : '已关闭：下次打开就得重新输入主密码', 'ok');
+    } else {
+      setMsg('enc-remember-msg', (res && res.error) || '保存失败', 'error');
+    }
+  });
   el('enc-lock-btn').addEventListener('click', lockEncryption);
   el('enc-disable-btn').addEventListener('click', disableEncryption);
   el('enc-change-btn').addEventListener('click', changeMasterPassword);

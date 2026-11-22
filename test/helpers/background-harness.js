@@ -116,8 +116,14 @@ function createFakeBrowserApi() {
  * 载入 background.js（连同共享模块），返回操作句柄。
  * 每次调用都会重建全局 Pwdmg* 命名空间，等同于重新加载扩展。
  */
-function loadBackground() {
+function loadBackground(options) {
   const fake = createFakeBrowserApi();
+  // 模拟「浏览器重启」：保留上一次会话的 storage.local，清空 session 与内存缓存
+  if (options && options.store) {
+    for (const [key, value] of options.store.entries()) {
+      fake.store.set(key, JSON.parse(JSON.stringify(value)));
+    }
+  }
   globalThis.chrome = fake.api;
   globalThis.browser = undefined;
 

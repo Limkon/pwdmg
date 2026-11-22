@@ -169,10 +169,23 @@
   async function getKey(c) {
     if (c && c.key) return c.key;
     const raw = await S.readSessionKey();
-    if (!raw) return null;
+    if (raw) {
+      try {
+        return await Crypto.importKey(raw);
+      } catch (err) {
+        /* 会话密钥损坏，继续尝试本机记住的密钥 */
+      }
+    }
+    // 「记住本机」：会话密钥丢了（浏览器重启 / 新会话）时，用本地记住的密钥恢复，
+    // 主密码不需要再输入。密钥过期或损坏时统一返回 null（保持锁定）。
+    const remembered = await S.readRememberedKey();
+    if (!remembered) return null;
     try {
-      return await Crypto.importKey(raw);
+      const key = await Crypto.importKey(remembered);
+      await S.writeSessionKey(remembered).catch(() => undefined);
+      return key;
     } catch (err) {
+      await S.clearRememberedKey().catch(() => undefined);
       return null;
     }
   }
@@ -215,6 +228,7 @@
         base.locked = true;
         base.vault = V.empty();
         await S.writeSessionKey(null);
+        await S.clearRememberedKey();
       }
       return base;
     }
@@ -706,13 +720,22 @@
       if (code === 'locked') {
         c.locked = true;
         c.lastError = null;
+      } else if (code === 'bad-key') {
+        // 本地密文与远端信封互相解不开（另一台设备可能改过主密码 / 重加密）：
+        // 清掉当前会话密钥，回到锁定态，让用户重新输入当前主密码（解锁时会用远端信封兜底）。
+        c.locked = true;
+        c.lastError = null;
+        c.notice = '远端密码库已重加密（其他设备可能改过主密码），请重新输入当前主密码';
+        c.key = null;
+        await S.writeSessionKey(null).catch(() => undefined);
+        await S.clearRememberedKey().catch(() => undefined);
       } else {
         c.lastError = message;
         consecutiveFailures += 1;
       }
       await persist();
       await refreshBadge();
-      return { ok: false, configured: true, locked: code === 'locked', error: message, code: code || 'error' };
+      return { ok: false, configured: true, locked: code === 'locked' || code === 'bad-key', error: message, code: code || 'error' };
     }
   }
 
@@ -930,7 +953,19 @@
   async function rememberKey(c, key) {
     c.key = key;
     c.locked = false;
-    await S.writeSessionKey(await Crypto.exportKey(key));
+    const raw = await Crypto.exportKey(key);
+    await S.writeSessionKey(raw);
+    try {
+      const settings = await S.getSettings();
+      const days = Number(settings && settings.rememberDeviceDays) || 0;
+      if (days > 0) {
+        await S.writeRememberedKey(raw, days);
+      } else {
+        await S.clearRememberedKey();
+      }
+    } catch (err) {
+      /* 记住本机失败不阻塞解锁 */
+    }
   }
 
   async function unlockVault(message) {
@@ -942,21 +977,24 @@
     let kdf = c.kdf || (c.cipher && c.cipher.kdf) || null;
     let envelope = null;
 
-    if (settings.webdavUrl) {
-      try {
-        const client = D.createClient(settings);
-        const remote = await client.read();
-        const remoteEnvelope = remote.exists ? Crypto.parseEnvelope(remote.text) : null;
-        if (remoteEnvelope) {
-          envelope = remoteEnvelope;
-          kdf = remoteEnvelope.kdf;
+    // 已有本地密文时直接用本地信封验证，不必每次访问远端（快路径）；
+    // 全新设备没有本地缓存，必须先从远端拿信封再解锁。
+    if (!kdf) {
+      if (settings.webdavUrl) {
+        try {
+          const client = D.createClient(settings);
+          const remote = await client.read();
+          const remoteEnvelope = remote.exists ? Crypto.parseEnvelope(remote.text) : null;
+          if (remoteEnvelope) {
+            envelope = remoteEnvelope;
+            kdf = remoteEnvelope.kdf;
+          }
+        } catch (err) {
+          return { ok: false, error: '无法读取远端密码库：' + errText(err) };
         }
-      } catch (err) {
-        if (!kdf) return { ok: false, error: '无法读取远端密码库：' + errText(err) };
       }
+      if (!kdf) return { ok: false, code: 'not-encrypted', error: '密码库还没有启用主密码加密' };
     }
-
-    if (!kdf) return { ok: false, code: 'not-encrypted', error: '密码库还没有启用主密码加密' };
 
     let key;
     try {
@@ -965,7 +1003,7 @@
       return { ok: false, error: errText(err) };
     }
 
-    // 用本地密文或远端密文验证主密码
+    // 用本地密文验证主密码（无网络请求）。
     let verified = false;
     let localVault = null;
     if (c.cipher) {
@@ -976,12 +1014,23 @@
         verified = false;
       }
     }
-    if (!verified && envelope) {
+
+    // 全新设备没有本地密文一种情形：本地验证失败时，
+    // 用远端信封兜底（另一台设备改过主密码时本地 KDF 已失效，
+    // 重新拿远端 KDF 可救回这次解锁；失败则按主密码错误处理）。
+    if (!verified && settings.webdavUrl) {
       try {
-        localVault = V.parse(await Crypto.decryptText(envelope, key));
-        verified = true;
+        const client = D.createClient(settings);
+        const remote = await client.read();
+        envelope = remote.exists ? Crypto.parseEnvelope(remote.text) : null;
+        if (envelope) {
+          kdf = envelope.kdf;
+          key = await Crypto.deriveKey(password, kdf);
+          localVault = V.parse(await Crypto.decryptText(envelope, key));
+          verified = true;
+        }
       } catch (err) {
-        verified = false;
+        /* 退回到主密码错误 */
       }
     }
     if (!verified) return { ok: false, code: 'bad-password', error: '主密码不正确' };
@@ -1000,14 +1049,14 @@
     await persist();
     await refreshBadge();
 
-    const sync = await syncNow();
+    // 解锁立即返回，同步在后台继续执行，避免因远端/写入慢而卡住界面
+    requestSync().catch(() => undefined);
     notifyTabs();
     return {
       ok: true,
       encrypted: true,
       locked: false,
       entries: c.vault.entries.length,
-      sync,
     };
   }
 
@@ -1016,6 +1065,7 @@
     if (!c.encrypted) return { ok: false, error: '密码库未启用加密' };
     await persist(); // 先确保密文是最新的
     await S.writeSessionKey(null);
+    await S.clearRememberedKey();
     c.key = null;
     c.locked = true;
     c.vault = V.empty();
@@ -1076,6 +1126,7 @@
     c.encryptionDisabled = true;
     bumpRev(c);
     await S.writeSessionKey(null);
+    await S.clearRememberedKey();
     await S.saveSettings({ encryptVault: false });
     await persist();
     await refreshBadge();
@@ -1578,6 +1629,24 @@
 
     async 'vault:changeMasterPassword'(message) {
       return changeMasterPassword(message);
+    },
+
+    async 'vault:rememberDevice'(message) {
+      const remember = !!(message && message.remember);
+      const days = remember ? 7 : 0;
+      const settings = await S.saveSettings({ rememberDeviceDays: days });
+      if (!days) {
+        await S.clearRememberedKey();
+        return { ok: true, settings };
+      }
+      // 当前处于解锁状态时立即写入本机记住的密钥，
+      // 否则下次输入主密码解锁时会写入（滚动 7 天有效期）。
+      const c = await getCache();
+      const key = c && c.key ? c.key : await getKey(c);
+      if (key && !isLocked(c)) {
+        await S.writeRememberedKey(await Crypto.exportKey(key), days);
+      }
+      return { ok: true, settings };
     },
 
     async 'settings:changed'() {
