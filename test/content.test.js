@@ -662,3 +662,188 @@ test('覆盖层被页面重渲染移除后，自动重建并重新挂载图标',
   const hostAfter = window.document.querySelector('[data-pwdmg="overlay"]');
   assert.ok(hostAfter);
 });
+
+/* ------------------------------------------------------------------ *
+ * 回归：点「填充」后页面把登录弹层关掉，密码框消失 → 密码根本没填进去
+ * ------------------------------------------------------------------ */
+
+/**
+ * 造一个「点外面就关」的登录弹层：
+ * 页面在 document 上监听 pointerdown / mousedown / click，target 不在弹层里
+ * 就销毁弹层（Radix / MUI / Bootstrap Modal 以及各种自研弹层的常见做法）。
+ */
+function createDismissableModalPage(t, options) {
+  const opts = options || {};
+  const page = createPage(t, '<button id="openLogin">登录</button>', {
+    getState: stateResponse(
+      Object.assign(
+        {
+          settings: Object.assign({}, DEFAULT_SETTINGS, { autoOpenPanel: false, autoFillSingle: false }),
+          entries: [
+            { id: 'e1', host: 'example.com', title: 'example.com', username: 'alice', password: 'pw-alice' },
+          ],
+        },
+        opts.state || {}
+      )
+    ),
+  });
+  const { window } = page;
+  const stats = { closedByPage: 0 };
+
+  const open = () => {
+    const modal = window.document.createElement('div');
+    modal.id = 'login-modal';
+    modal.innerHTML =
+      '<form id="modal-login"><input id="mu" name="username" type="text" />' +
+      '<input id="mp" name="password" type="password" /><button type="submit">登录</button></form>';
+    window.document.body.appendChild(modal);
+    return modal;
+  };
+
+  const dismissIfOutside = (ev) => {
+    const modal = window.document.getElementById('login-modal');
+    if (!modal) return;
+    const path = typeof ev.composedPath === 'function' ? ev.composedPath() : [ev.target];
+    if (path.indexOf(modal) >= 0) return;
+    if (path.some((node) => node && node.id === 'openLogin')) return; // 打开弹层的按钮不算「外面」
+    stats.closedByPage += 1;
+    modal.remove(); // 密码框从 DOM 里消失
+  };
+  for (const type of ['pointerdown', 'mousedown', 'click']) {
+    window.document.addEventListener(type, dismissIfOutside);
+  }
+
+  window.document.getElementById('openLogin').addEventListener('click', open);
+  return { page, window, stats, open };
+}
+
+test('登录弹层「点外面就关」：点图标和填充都不该把弹层关掉', { skip }, async (t) => {
+  const { window, stats, open } = createDismissableModalPage(t);
+  await until(() => window.document.title !== undefined, '页面就绪');
+
+  window.document.getElementById('openLogin').click();
+  const modal = window.document.getElementById('login-modal');
+  assert.ok(modal, '登录弹层已打开');
+
+  // 等扩展扫描到这个动态弹层
+  await until(() => keyButtonOf(window), '动态登录弹层注入图标', 4000);
+
+  const keyBtn = keyButtonOf(window);
+  keyBtn.dispatchEvent(new window.MouseEvent('pointerdown', { bubbles: true, composed: true }));
+  keyBtn.dispatchEvent(new window.MouseEvent('mousedown', { bubbles: true, composed: true }));
+  keyBtn.click();
+
+  assert.equal(stats.closedByPage, 0, '点扩展图标不应被页面当成「点在外面」');
+  await until(() => panelOf(window) && panelOf(window).hidden === false, '面板已打开');
+
+  // 点「填充」
+  const fillBtn = overlayOf(window).querySelector('.row .mini');
+  fillBtn.dispatchEvent(new window.MouseEvent('pointerdown', { bubbles: true, composed: true }));
+  fillBtn.dispatchEvent(new window.MouseEvent('mousedown', { bubbles: true, composed: true }));
+  fillBtn.click();
+
+  assert.equal(stats.closedByPage, 0, '点填充后登录弹层必须还在');
+  assert.ok(window.document.getElementById('login-modal'), '弹层仍在 DOM 里');
+  assert.equal(window.document.getElementById('mp').value, 'pw-alice', '密码已填入');
+  assert.equal(window.document.getElementById('mu').value, 'alice', '用户名已填入');
+
+  // 弹层重新打开后仍能再填充（状态没有卡死）
+  open();
+  await until(() => keyButtonOf(window), '重新打开后图标恢复', 4000);
+});
+
+test('填充瞬间页面重建了密码框：重试后仍然填进新节点', { skip }, async (t) => {
+  const page = createPage(
+    t,
+    '<div id="modal"><form id="login"><input id="u" name="username" type="text" />' +
+      '<input id="p" name="password" type="password" /><button type="submit">登录</button></form></div>',
+    {
+      getState: stateResponse({
+        entries: [{ id: 'e1', host: 'example.com', title: 'example.com', username: 'alice', password: 'pw-alice' }],
+      }),
+    }
+  );
+  const { window } = page;
+  await until(() => keyButtonOf(window), '注入图标');
+
+  // 页面在收到第一次 input 时把整个登录框重挂一次（受控组件重新挂载）
+  let rebuilt = 0;
+  window.document.addEventListener('input', () => {
+    const modal = window.document.getElementById('modal');
+    if (!modal || rebuilt) return;
+    rebuilt += 1;
+    modal.innerHTML =
+      '<form id="login"><input id="u2" name="username" type="text" />' +
+      '<input id="p2" name="password" type="password" /><button type="submit">登录</button></form>';
+  });
+
+  keyButtonOf(window).click();
+  await until(() => panelOf(window) && panelOf(window).hidden === false, '面板已打开');
+
+  const fillBtn = overlayOf(window).querySelector('.row .mini');
+  fillBtn.dispatchEvent(new window.MouseEvent('pointerdown', { bubbles: true, composed: true }));
+  fillBtn.click();
+
+  await until(() => rebuilt >= 1, '页面确实重建过密码框', 2000);
+  await until(() => {
+    const pass = window.document.getElementById('p2');
+    return pass && pass.value === 'pw-alice';
+  }, '新密码框最终被填上', 3000);
+  assert.equal(window.document.getElementById('u2').value, 'alice');
+});
+
+test('非标准密码框：type="text" + -webkit-text-security 也要能认出并填充', { skip }, async (t) => {
+  const page = createPage(
+    t,
+    '<form id="login"><input id="u" name="username" type="text" />' +
+      '<input id="p" name="password" type="text" class="password-input" />' +
+      '<button type="submit">登录</button></form>',
+    {
+      getState: stateResponse({
+        settings: Object.assign({}, DEFAULT_SETTINGS, { autoFillSingle: true }),
+        entries: [{ id: 'e1', host: 'example.com', title: 'example.com', username: 'alice', password: 'pw-alice' }],
+      }),
+    }
+  );
+  const { window } = page;
+
+  await until(() => window.document.getElementById('p').value === 'pw-alice', '掩码密码框被自动填充', 3000);
+  assert.equal(window.document.getElementById('u').value, 'alice');
+  assert.ok(keyButtonOf(window), '图标也要注入');
+});
+
+test('只读 / 禁用的密码框不算登录框', { skip }, async (t) => {
+  const page = createPage(
+    t,
+    '<form><input name="username" type="text" />' +
+      '<input id="ro" name="password" type="password" readonly /></form>' +
+      '<form><input name="username2" type="text" />' +
+      '<input id="dis" name="password2" type="password" disabled /></form>',
+    { getState: stateResponse({ entries: [] }) }
+  );
+  const { window } = page;
+  await wait(300);
+  assert.equal(keyButtonOf(window), null);
+  assert.equal(window.document.getElementById('ro').value, '');
+});
+
+test('样式走 adoptedStyleSheets（严格 CSP 站点不会因为没有样式而“隐形”）', { skip }, async (t) => {
+  const page = createPage(
+    t,
+    '<form><input name="username" type="text" /><input name="password" type="password" /></form>',
+    { getState: stateResponse() }
+  );
+  const { window } = page;
+  await until(() => keyButtonOf(window), '注入图标');
+
+  const root = overlayOf(window);
+  if ('adoptedStyleSheets' in root && typeof window.CSSStyleSheet === 'function') {
+    assert.ok(root.adoptedStyleSheets && root.adoptedStyleSheets.length >= 1, '应使用 adoptedStyleSheets');
+    const css = root.adoptedStyleSheets[0].cssRules ? root.adoptedStyleSheets[0].cssRules : [];
+    assert.ok(css.length > 0, '样式表里有规则');
+  } else {
+    assert.ok(root.querySelector('style'), '退回到 <style>');
+  }
+  // 无论走哪条路，<style> 都不应该被重复塞很多份
+  assert.ok(root.querySelectorAll('style').length <= 1);
+});

@@ -178,6 +178,7 @@
     lastCaptureKey: '',
     lastCaptureAt: 0,
     lastFillAt: 0,
+    lastPanelToggleAt: 0,
     toastTimer: null,
     locked: false,
     lockedHintShown: false,
@@ -186,6 +187,171 @@
   };
 
   let overlay = null; // { host, root, panel, panelList, panelSite, panelHint, toastEl }
+
+  /* ------------------------------------------------------------------ *
+   * 按下事件隔离（解决「点填充后登录框直接消失」）
+   *
+   * 覆盖层挂在 <html> 下，对页面来说它就是「登录弹层之外的元素」。
+   * 大量站点（Radix / MUI / Bootstrap 的 Modal，以及各种自研登录弹层）会在
+   * document 上监听 pointerdown / mousedown / click，判断 target 不在弹层里就关掉弹层；
+   * 有的还监听 focusout，一失焦就关。
+   *
+   * 结果是：点「填充」→ 页面先把登录弹层关掉 → 密码框从 DOM 里消失 → 填充落空。
+   * 表现就是「点填充后密码框消失，但没有填入密码」。
+   *
+   * 这里在 window 的捕获阶段（比页面注册在 document 上的监听器都早）把落进覆盖层的
+   * 事件拦下来：页面完全收不到这次点击，弹层就不会被关；动作在按下瞬间执行，
+   * 此时目标输入框一定还在，而且防止默认行为后焦点也不会离开密码框。
+   * ------------------------------------------------------------------ */
+
+  const pressAction = new WeakMap(); // Element -> fn(ev)
+  const pressAt = new WeakMap(); // Element -> 由按下触发的时间戳
+  const PRESS_DEDUPE = 800;
+  const PRESS_TYPES = ['pointerdown', 'mousedown', 'touchstart', 'click'];
+
+  function bindPress(el, action) {
+    pressAction.set(el, action);
+    return el;
+  }
+
+  function eventPath(ev) {
+    if (typeof ev.composedPath === 'function') {
+      const path = ev.composedPath();
+      if (path && path.length) return path;
+    }
+    return [];
+  }
+
+  /** 事件是否落在扩展覆盖层里（穿透 shadow DOM 判断） */
+  function eventFromOverlay(ev) {
+    if (!overlay || !overlay.host) return false;
+    const path = eventPath(ev);
+    if (path.length) return path.indexOf(overlay.host) >= 0;
+    return ev.target === overlay.host;
+  }
+
+  /** 取路径里最内层的可交互元素（先命中的是「填充」按钮，而不是外层行） */
+  function pressableFrom(ev) {
+    for (const node of eventPath(ev)) {
+      if (node && pressAction.has(node)) return node;
+    }
+    return null;
+  }
+
+  function activatePress(target, ev) {
+    const action = pressAction.get(target);
+    if (!action) return;
+    pressAt.set(target, Date.now());
+    try {
+      action(ev);
+    } catch (err) {
+      /* 单个动作出错不应该影响其它交互 */
+    }
+  }
+
+  function installPressGuard() {
+    const guard = (ev) => {
+      if (!eventFromOverlay(ev)) return;
+
+      // 关键一步：页面注册在 window/document 上的「点外面就关」监听器
+      // 一个都收不到这次事件，登录弹层因此不会被关闭
+      ev.stopPropagation();
+
+      const target = pressableFrom(ev);
+      const last = target ? pressAt.get(target) || 0 : 0;
+      const justPressed = Date.now() - last < PRESS_DEDUPE;
+
+      // 面板 / 确认卡片内部：input 还是让它们正常同步；其它一律按点击控件处理
+      if (!target) {
+        const inner = eventPath(ev)[0];
+        const tag = inner && inner.tagName;
+        const editable = tag === 'INPUT' || tag === 'TEXTAREA';
+        if (!editable && ev.type !== 'touchstart') ev.preventDefault();
+        return;
+      }
+
+      if (ev.type === 'click') {
+        ev.preventDefault();
+        if (justPressed) return; // 按下阶段已经执行过，别填两次
+        activatePress(target, ev); // 键盘 Enter / 空格产生的 click
+        return;
+      }
+
+      if (ev.type === 'touchstart') {
+        // 不 preventDefault：手指按下还不能判断是点击还是滚动列表，
+        // 真正的动作交给随后的 click（action 未执行，pressAt 仍为旧值）
+        return;
+      }
+
+      if (ev.type === 'pointerdown' && ev.pointerType === 'touch') return;
+
+      // 鼠标按下：先执行动作（此时输入框一定还在），并阻止焦点离开密码框
+      ev.preventDefault();
+      if (!justPressed) activatePress(target, ev);
+    };
+
+    for (const type of PRESS_TYPES) {
+      window.addEventListener(type, guard, true);
+    }
+    // 页面监听的是 document 时，window 捕获阶段就能先拦下来（见上面的守卫）
+    if (window !== window.top) return;
+    window.addEventListener(
+      'focusin',
+      (ev) => {
+        if (eventFromOverlay(ev)) ev.stopPropagation();
+      },
+      true
+    );
+  }
+
+  /* ------------------------------------------------------------------ *
+   * 样式注入
+   * ------------------------------------------------------------------ */
+
+  /**
+   * 严格 CSP 的站点（GitHub、部分银行 / 企业后台）会拦截内容脚本插入的 <style>
+   * 标签（constructable stylesheet 的 replaceSync 也一样会被拦），于是面板/图标
+   * 全是没有样式的裸元素，看起来就像「插件坏了」。
+   *
+   * 这里优先用不会触发 CSP 的 adoptedStyleSheets；失败时退回 <style>，
+   * 再失败就把关键样式直接写成行内样式，保证遮罩层、定位、层级这些仍然成立。
+   */
+  function installStyles(root) {
+    const setCss = (target, text) => {
+      try {
+        target.style.cssText = text;
+        return true;
+      } catch (err) {
+        return false;
+      }
+    };
+
+    try {
+      if (typeof CSSStyleSheet === 'function' && 'adoptedStyleSheets' in root) {
+        const sheet = new CSSStyleSheet({ baseURL: location.href });
+        sheet.replaceSync(STYLE);
+        root.adoptedStyleSheets = root.adoptedStyleSheets.concat([sheet]);
+        return;
+      }
+    } catch (err) {
+      /* 落到 <style> */
+    }
+
+    const style = document.createElement('style');
+    style.textContent = STYLE;
+    root.appendChild(style);
+
+    // 判断样式是否真的生效：被 CSP 拦掉的 <style> 在 shadow root 里不会产出规则
+    const check = () => {
+      try {
+        if (style.sheet && style.sheet.cssRules && style.sheet.cssRules.length) return;
+      } catch (err) {
+        /* 被拦截时读 cssRules 会抛错，继续兜底 */
+      }
+      setCss(root.host, 'all: initial; display: block; width: 0; height: 0; overflow: visible;');
+    };
+    check();
+  }
 
   /* ------------------------------------------------------------------ *
    * DOM 注入
@@ -205,9 +371,7 @@
     host.style.cssText =
       'all: initial !important; display: block !important; width: 0 !important; height: 0 !important; pointer-events: none !important;';
     const root = host.attachShadow({ mode: 'open' });
-    const style = document.createElement('style');
-    style.textContent = STYLE;
-    root.appendChild(style);
+    installStyles(root);
 
     const panel = document.createElement('div');
     panel.className = 'panel';
@@ -227,7 +391,7 @@
     close.type = 'button';
     close.title = '关闭';
     close.textContent = '×';
-    close.addEventListener('click', (ev) => {
+    bindPress(close, (ev) => {
       ev.preventDefault();
       ev.stopPropagation();
       state.dismissed = true;
@@ -245,7 +409,7 @@
     manage.className = 'link';
     manage.type = 'button';
     manage.textContent = '管理密码库 / 同步设置';
-    manage.addEventListener('click', (ev) => {
+    bindPress(manage, (ev) => {
       ev.preventDefault();
       ev.stopPropagation();
       sendMessage({ type: 'ui:openOptions' });
@@ -274,7 +438,7 @@
     askDeny.type = 'button';
     askDeny.className = 'deny';
     askDeny.textContent = '保留旧密码';
-    askDeny.addEventListener('click', (ev) => {
+    bindPress(askDeny, (ev) => {
       ev.preventDefault();
       ev.stopPropagation();
       declinePendingUpdate();
@@ -283,13 +447,15 @@
     askAgree.type = 'button';
     askAgree.className = 'agree';
     askAgree.textContent = '更新密码';
-    askAgree.addEventListener('click', (ev) => {
+    bindPress(askAgree, (ev) => {
       ev.preventDefault();
       ev.stopPropagation();
       confirmPendingUpdate();
     });
     askBtns.append(askDeny, askAgree);
     ask.append(askTitle, askText, askBtns);
+    // 卡片弹出时不要把焦点从密码框抢走：有的站点监听 focusout 就关登录弹层
+    ask.addEventListener('mousedown', (ev) => ev.preventDefault());
     root.appendChild(ask);
 
     const toast = document.createElement('div');
@@ -330,9 +496,50 @@
    * 表单识别
    * ------------------------------------------------------------------ */
 
+  /**
+   * 是不是一个「密码输入框」。
+   *
+   * 除了标准的 type="password"，还有一批站点自己实现：
+   *  - 把真实密码框设成 type="text"，靠 -webkit-text-security / text-security 掩码
+   *    （Chrome / Safari 支持），以便绕开浏览器自己的密码管理器；
+   *  - 用 class 标记 role（如 class="password-input"）。
+   * 这些框如果认不出来，页面上就永远不会有图标与面板。
+   */
+  const passwordGuess = new WeakMap(); // el -> { sig, result }（避免每秒对整页文本框刷 getComputedStyle）
+
+  function isPasswordInput(el) {
+    if (!el || el.tagName !== 'INPUT') return false;
+    const type = String(el.type || '').toLowerCase();
+    if (type === 'password') return true;
+    if (type && type !== 'text') return false;
+
+    const ac = autoCompleteOf(el);
+    const hint = [el.name, el.id, el.className, el.getAttribute('data-type'), el.getAttribute('placeholder')]
+      .join(' ')
+      .toLowerCase();
+    const sig = type + '|' + ac + '|' + hint;
+    const cached = passwordGuess.get(el);
+    if (cached && cached.sig === sig) return cached.result;
+
+    const hintSays = /password|passwd|pwd|密码/.test(hint) && !/username|account|e-?mail|用户|账号/.test(hint);
+    let result = hintSays || ac === 'current-password';
+    if (!result) {
+      try {
+        const style = window.getComputedStyle(el);
+        const security = style && (style.webkitTextSecurity || style.getPropertyValue('-webkit-text-security'));
+        result = !!security && String(security).trim() !== '' && String(security).trim() !== 'none';
+      } catch (err) {
+        result = false;
+      }
+    }
+    passwordGuess.set(el, { sig, result });
+    return result;
+  }
+
   function isVisible(el) {
     if (!el || el.disabled) return false;
     if (el.type === 'hidden') return false;
+    if (el.readOnly) return false; // 只读框不接受写入，页面通常用它做展示/占位
     const rect = el.getBoundingClientRect();
     if (rect.width < 20 || rect.height < 8) return false;
     const style = window.getComputedStyle(el);
@@ -363,7 +570,7 @@
     if (!scope || !scope.querySelectorAll) return [];
     const out = [];
     for (const el of walkElements(scope)) {
-      if (el.tagName === 'INPUT' && String(el.type || '').toLowerCase() === 'password' && isVisible(el)) {
+      if (isPasswordInput(el) && isVisible(el)) {
         out.push(el);
       }
     }
@@ -468,7 +675,7 @@
     const seen = new Set();
     const all = [];
     for (const el of walkElements(document)) {
-      if (el.tagName === 'INPUT' && String(el.type || '').toLowerCase() === 'password' && isVisible(el)) all.push(el);
+      if (isPasswordInput(el) && isVisible(el)) all.push(el);
     }
     for (const passEl of all) {
       const container = containerFor(passEl);
@@ -551,11 +758,9 @@
       btn.title = '秦二密码：填充已保存的账号';
       btn.setAttribute('aria-label', '秦二密码 填充账号');
       btn.innerHTML = KEY_SVG;
-      btn.addEventListener('mousedown', (ev) => {
-        ev.preventDefault();
-        ev.stopPropagation();
-      });
-      btn.addEventListener('click', (ev) => {
+      // 按下即打开：登录弹层常见的「点外面先关闭」发生在 click 之前，
+      // 等 click 再处理时密码框已经被页面移走了
+      bindPress(btn, (ev) => {
         ev.preventDefault();
         ev.stopPropagation();
         state.dismissed = false;
@@ -642,7 +847,7 @@
     fillBtn.className = 'mini';
     fillBtn.type = 'button';
     fillBtn.textContent = '填充';
-    fillBtn.addEventListener('click', (ev) => {
+    bindPress(fillBtn, (ev) => {
       ev.preventDefault();
       ev.stopPropagation();
       doFill(entry, false);
@@ -653,7 +858,7 @@
     loginBtn.type = 'button';
     loginBtn.title = '填充并提交';
     loginBtn.textContent = '↵';
-    loginBtn.addEventListener('click', (ev) => {
+    bindPress(loginBtn, (ev) => {
       ev.preventDefault();
       ev.stopPropagation();
       doFill(entry, true);
@@ -662,10 +867,16 @@
     acts.append(fillBtn, loginBtn);
     row.append(avatar, meta, acts);
 
-    row.addEventListener('click', () => doFill(entry, false));
+    // 整行也是「按下即填充」：先命中按钮时按钮优先（见 pressableFrom）
+    bindPress(row, (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      doFill(entry, false);
+    });
     row.addEventListener('keydown', (ev) => {
       if (ev.key === 'Enter' || ev.key === ' ') {
         ev.preventDefault();
+        ev.stopPropagation();
         doFill(entry, false);
       }
     });
@@ -683,6 +894,7 @@
 
   function openPanel(form) {
     if (!form || !state.entries.length) return;
+    state.lastPanelToggleAt = Date.now();
     const ui = ensureOverlay();
     state.active = form;
     state.panelOpen = true;
@@ -697,6 +909,7 @@
 
   function closePanel() {
     if (!overlay || !state.panelOpen) return;
+    state.lastPanelToggleAt = Date.now();
     overlay.panel.hidden = true;
     state.panelOpen = false;
     state.active = null;
@@ -750,32 +963,112 @@
     fillForm(form, entry, submit);
   }
 
+  /** 把值写进输入框，并让页面自己的 state 感知到（React / Vue 的受控组件） */
+  function writeValue(el, value) {
+    setNativeValue(el, value);
+    try {
+      el.dispatchEvent(new InputEvent('input', { bubbles: true, composed: true, inputType: 'insertText', data: value }));
+    } catch (err) {
+      /* 老浏览器没有 InputEvent，上面的 input 事件已经够了 */
+    }
+  }
+
+  /**
+   * 按内容重新认领当前登录框。
+   *
+   * 覆盖层挂在 <html> 下，页面一旦重渲染（React 重新挂载、弹层被关掉再打开），
+   * 输入框会换成新节点；扫描兜底最多要等 1 秒，这段时间里拿旧节点写值等于白写。
+   * 这里在填充的每一拍重新扫描，只认「同一个密码框」（同一个节点，或者仍然可见的
+   * 同类登录框），宁可放弃也不糊到别的表单里。
+   */
+  function reacquireForm(form) {
+    if (!form) return null;
+    if (form.passEl && form.passEl.isConnected && isVisible(form.passEl)) return form;
+    let forms = [];
+    try {
+      forms = scanForms();
+    } catch (err) {
+      forms = [];
+    }
+    const sameNode = forms.find((f) => f.passEl === form.passEl);
+    if (sameNode) return sameNode;
+    const loginForms = forms.filter((f) => !f.isNew);
+    if (loginForms.length === 1) return loginForms[0];
+    return null;
+  }
+
+  const FILL_ROUNDS = 10;
+  const FILL_INTERVAL = 140;
+  const FILL_STABLE = 2; // 连续几拍读到同一个值才算真的填进去了
+  const fillTimers = new Set();
+
+  /**
+   * 填充 + 校验。
+   *
+   * 有些站点在密码框上挂自己的监听器，写到一半就把值回滚、或者干脆把整个弹层重建，
+   * 所以填完要核对一次；没生效就在 1.4 秒内重试几拍，避免「填充了但密码框是空的」。
+   */
   function fillForm(form, entry, submit) {
     if (!form) return;
     const password = String(entry.password == null ? '' : entry.password);
     const username = String(entry.username == null ? '' : entry.username);
 
-    if (form.userEl && username) {
-      setNativeValue(form.userEl, username);
-    }
-    setNativeValue(form.passEl, password);
-    form.lastFill = { username, password, at: Date.now(), entryId: entry.id };
     state.dismissed = true;
     state.lastFillAt = Date.now();
     closePanel();
 
-    try {
-      form.passEl.focus({ preventScroll: true });
-    } catch (err) {
-      /* ignore */
+    let attempts = 0;
+    let stableReads = 0;
+    let usedSent = false;
+    let lastForm = form;
+
+    const tick = () => {
+      const target = reacquireForm(lastForm);
+      if (!target) {
+        // 页面正在重建：等下一拍再认领，别直接放弃
+        const timer = setTimeout(tick, FILL_INTERVAL);
+        fillTimers.add(timer);
+        return;
+      }
+      lastForm = target;
+      attempts += 1;
+
+      if (target.userEl && username) writeValue(target.userEl, username);
+      writeValue(target.passEl, password);
+      target.lastFill = { username, password, at: Date.now(), entryId: entry.id };
+
+      try {
+        target.passEl.focus({ preventScroll: true });
+      } catch (err) {
+        /* ignore */
+      }
+      try {
+        target.passEl.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, key: 'Unidentified' }));
+      } catch (err) {
+        /* ignore */
+      }
+
+      // 只看「写进去的值还在」不够：页面有时下一拍才把值回滚或重挂节点，
+      // 所以要求连续几拍都读到同一个值才收手
+      stableReads = String(target.passEl.value || '') === password ? stableReads + 1 : 0;
+      // 值一旦写进去就记账（页面可能立刻跳转，等不到「稳定」）
+      if (stableReads >= 1 && entry.id && !usedSent) {
+        usedSent = true;
+        sendMessage({ type: 'credential:used', id: entry.id });
+      }
+      if (stableReads >= FILL_STABLE || attempts >= FILL_ROUNDS) return;
+      const timer = setTimeout(tick, FILL_INTERVAL);
+      fillTimers.add(timer);
+    };
+
+    tick();
+
+    if (submit) {
+      setTimeout(() => {
+        const target = reacquireForm(lastForm) || lastForm;
+        if (String(target.passEl && target.passEl.value) === password) submitForm(target);
+      }, 80);
     }
-    try {
-      form.passEl.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, key: 'a' }));
-    } catch (err) {
-      /* ignore */
-    }
-    if (entry.id) sendMessage({ type: 'credential:used', id: entry.id });
-    if (submit) setTimeout(() => submitForm(form), 60);
   }
 
   /* ------------------------------------------------------------------ *
@@ -787,6 +1080,9 @@
     return rect.bottom > 0 && rect.top < window.innerHeight && rect.right > 0 && rect.left < window.innerWidth;
   }
 
+  const AUTO_FILL_DELAY = 150;
+  let pendingAutoFill = null;
+
   function maybeAutoPrompt() {
     if (!state.settings.autoPrompt || !state.entries.length) return;
     if (state.autoOpened || state.dismissed) return;
@@ -797,8 +1093,17 @@
     const canAutofill =
       state.settings.autoFillSingle && state.entries.length === 1 && !form.passEl.value && !(form.userEl && form.userEl.value);
     if (canAutofill) {
+      if (pendingAutoFill) clearTimeout(pendingAutoFill);
       if (form.btn) form.btn.setAttribute('data-hint', '1');
-      fillForm(form, state.entries[0], false);
+      // 稍等一拍再填：登录弹层往往刚渲染完还会再重排一次节点，
+      // 立刻写值容易被页面自己的初始化覆盖掉
+      pendingAutoFill = setTimeout(() => {
+        pendingAutoFill = null;
+        if (state.dismissed) return;
+        const target = reacquireForm(form);
+        if (!target) return;
+        fillForm(target, state.entries[0], false);
+      }, AUTO_FILL_DELAY);
       state.dismissed = false;
       return;
     }
@@ -1068,6 +1373,8 @@
       if (!form) return;
       if (!state.settings.autoPrompt || !state.entries.length || state.panelOpen) return;
       if (Date.now() - state.lastFillAt < 1200) return; // 刚填充完不要立刻再弹
+      // 刚点过图标 / 刚关掉面板就别立刻又弹回来，否则会一直挡着密码框
+      if (Date.now() - state.lastPanelToggleAt < 1500) return;
       state.dismissed = false;
       openPanel(form);
     });
@@ -1176,6 +1483,9 @@
   }
 
   function onNavigate() {
+    // 上一次填充的重试计时器不该跨页继续跑（否则会往新页面的框里写旧账号）
+    for (const timer of fillTimers) clearTimeout(timer);
+    fillTimers.clear();
     state.autoOpened = false;
     state.dismissed = false;
     state.refreshCount = 0;
@@ -1221,6 +1531,9 @@
     window.addEventListener('scroll', schedulePosition, true);
     window.addEventListener('resize', schedulePosition, true);
     document.addEventListener('scroll', schedulePosition, true);
+    // 页面弹层自己内部滚动（不冒泡到 window）时图标/面板也要跟上
+    window.addEventListener('wheel', schedulePosition, { capture: true, passive: true });
+    window.addEventListener('touchmove', schedulePosition, { capture: true, passive: true });
 
     // 面板打开时保持贴住输入框（有些站点会动态移动输入框）
     setInterval(() => {
@@ -1271,6 +1584,7 @@
    * 启动
    * ------------------------------------------------------------------ */
 
+  installPressGuard();
   registerCaptureHooks();
   watchNavigation();
   refresh();
