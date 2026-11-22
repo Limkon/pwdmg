@@ -192,7 +192,14 @@
    * ------------------------------------------------------------------ */
 
   function ensureOverlay() {
-    if (overlay) return overlay;
+    // 页面（SPA 路由切换 / 整体重渲染）可能把覆盖层元件移出 DOM，检测后重建，
+    // 并把依赖旧覆盖层的面板状态重置，避免 key button / panel 失效
+    if (overlay && overlay.host && overlay.host.isConnected) return overlay;
+    if (overlay) {
+      state.panelOpen = false;
+      state.active = null;
+    }
+    overlay = null;
     const host = document.createElement('div');
     host.setAttribute('data-pwdmg', 'overlay');
     host.style.cssText =
@@ -338,9 +345,29 @@
     return String(el.getAttribute('autocomplete') || '').toLowerCase();
   }
 
+  /**
+   * 收集 scope 内的全部元素（穿透 open shadow DOM）。
+   * mail.com 这类 SPA / web-component 页面把密码框渲染进 Shadow DOM：
+   * document.querySelectorAll 看不见，MutationObserver 也不会报 shadow 内部的变更，
+   * 所以全局查询全部走这个函数。closed shadow DOM 本质不可访问，不属于此处理范畴。
+   */
+  function* walkElements(scope) {
+    if (!scope || !scope.querySelectorAll) return;
+    for (const el of Array.from(scope.querySelectorAll('*'))) {
+      yield el;
+      if (el.shadowRoot) yield* walkElements(el.shadowRoot);
+    }
+  }
+
   function passwordFieldsIn(scope) {
     if (!scope || !scope.querySelectorAll) return [];
-    return Array.from(scope.querySelectorAll('input[type="password"]')).filter(isVisible);
+    const out = [];
+    for (const el of walkElements(scope)) {
+      if (el.tagName === 'INPUT' && String(el.type || '').toLowerCase() === 'password' && isVisible(el)) {
+        out.push(el);
+      }
+    }
+    return out;
   }
 
   function scoreUsernameCandidate(el) {
@@ -383,7 +410,12 @@
   }
 
   function findUsernameInput(passEl, scope) {
-    const inputs = Array.from(scope.querySelectorAll('input')).filter((el) => el !== passEl && isVisible(el));
+    const inputs = [];
+    for (const el of walkElements(scope)) {
+      if (el.tagName !== 'INPUT') continue;
+      if (el === passEl) continue;
+      if (isVisible(el)) inputs.push(el);
+    }
     const before = inputs.filter(
       (el) => el.compareDocumentPosition(passEl) & Node.DOCUMENT_POSITION_FOLLOWING
     );
@@ -434,7 +466,10 @@
   function scanForms() {
     const result = [];
     const seen = new Set();
-    const all = Array.from(document.querySelectorAll('input[type="password"]')).filter(isVisible);
+    const all = [];
+    for (const el of walkElements(document)) {
+      if (el.tagName === 'INPUT' && String(el.type || '').toLowerCase() === 'password' && isVisible(el)) all.push(el);
+    }
     for (const passEl of all) {
       const container = containerFor(passEl);
       if (!container || seen.has(container)) continue;
@@ -502,6 +537,12 @@
     }
 
     const ui = ensureOverlay();
+    for (const form of state.forms) {
+      // 覆盖层重建后旧按钮在 detached 的 shadow root 里，视为未挂载
+      if (form.btn && !form.btn.isConnected) {
+        form.btn = null;
+      }
+    }
     for (const form of state.forms) {
       if (form.btn || form.isNew) continue; // 注册 / 修改密码表单不挂图标
       const btn = document.createElement('button');
@@ -1173,6 +1214,9 @@
     } catch (err) {
       /* ignore */
     }
+    // 定时兜底：内容站点可能用同一个挂载点多次填充登录框（MutationObserver 不会报 shadow 内容的变更），
+    // 这里按固定周期刷新，覆盖“弹层里的表单被改写/重建”这类场景
+    setInterval(() => rescan(), 1000);
 
     window.addEventListener('scroll', schedulePosition, true);
     window.addEventListener('resize', schedulePosition, true);

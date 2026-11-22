@@ -578,3 +578,87 @@ test('弹窗请求填充：填入密码并把条目 id 记回后台（用于“�
   await wait(120);
   assert.equal(calls.capture.length, 0);
 });
+
+test('登录框在按钮点击后才出现：注入按钮与面板', async (t) => {
+  const page = createPage(
+    t,
+    '<button id="loginBtn">登录</button>',
+    { getState: stateResponse({ settings: Object.assign({}, DEFAULT_SETTINGS, { autoOpenPanel: true }) }) }
+  );
+  const { window } = page;
+
+  // 页面初始没有登录框，不挂图标、也不展示面板
+  await wait(600);
+  assert.equal(keyButtonOf(window), null);
+
+  // 用户点击登录按钮，页面动态弹出登录框
+  window.document.getElementById('loginBtn').click();
+  const modal = window.document.createElement('div');
+  modal.id = 'modal';
+  modal.innerHTML =
+    '<form id="login"><input id="u" name="username" type="text" /><input id="p" name="password" type="password" /><button type="submit">登录</button></form>';
+  window.document.body.appendChild(modal);
+
+  // 内容脚本应检测到动态登录框并注入图标 + 弹出面板
+  await until(() => keyButtonOf(window), '弹出登录框后注入图标', 3000);
+  await until(() => panelOf(window) && panelOf(window).hidden === false, '弹出登录框后打开面板', 3000);
+
+  const panel = panelOf(window);
+  assert.equal(panel.querySelectorAll('.row').length, 1);
+  assert.match(panel.querySelector('.panel-site, .site').textContent, /example\.com/);
+});
+
+test('登录框弹在 open shadow DOM 里：注入按钮与面板', async (t) => {
+  const page = createPage(
+    t,
+    '<button id="loginBtn">登录</button>',
+    { getState: stateResponse({ settings: Object.assign({}, DEFAULT_SETTINGS, { autoOpenPanel: true }) }) }
+  );
+  const { window } = page;
+
+  await wait(600);
+  assert.equal(keyButtonOf(window), null);
+
+  // 用户点击登录按钮，页面弹出一个影子 DOM 里的登录框（mail.com 这类结构）
+  window.document.getElementById('loginBtn').click();
+  const host = window.document.createElement('div');
+  host.id = 'login-modal';
+  window.document.body.appendChild(host);
+  const shadow = host.attachShadow({ mode: 'open' });
+  shadow.innerHTML =
+    '<form id="login"><input id="u" name="username" type="text" /><input id="p" name="password" type="password" /><button type="submit">登录</button></form>';
+
+  await until(() => keyButtonOf(window), 'shadow-DOM 登录框注入图标', 4000);
+  await until(() => panelOf(window) && panelOf(window).hidden === false, 'shadow-DOM 登录框打开面板', 4000);
+
+  const panel = panelOf(window);
+  assert.equal(panel.querySelectorAll('.row').length, 1);
+  const pass = shadow.querySelector('input[type="password"]');
+  assert.ok(pass);
+  assert.equal(pass.tagName, 'INPUT');
+});
+
+test('覆盖层被页面重渲染移除后，自动重建并重新挂载图标', async (t) => {
+  const page = createPage(
+    t,
+    '<form><input id="u" type="text" name="username" /><input id="p" type="password" name="password" /><button type="submit">登录</button></form>',
+    { getState: stateResponse({ settings: Object.assign({}, DEFAULT_SETTINGS, { autoOpenPanel: false }) }) }
+  );
+  const { window } = page;
+  await until(() => keyButtonOf(window), '初始图标注入', 3000);
+
+  // 模拟 SPA 页面整体重渲染，把覆盖层宿主移出 DOM
+  const host = window.document.querySelector('[data-pwdmg="overlay"]');
+  assert.ok(host, 'overlay 存在');
+  host.parentElement.removeChild(host);
+  await wait(300);
+
+  // 定时兜底扫描后，覆盖层重建并重新挂载图标
+  await until(() => keyButtonOf(window), 'overlay 重建后图标恢复', 5000);
+  const panel = panelOf(window);
+  assert.ok(panel === null || panel.hidden !== false, '无面板状态');
+
+  // 面板/图标所在宿主仍在 <html> 下
+  const hostAfter = window.document.querySelector('[data-pwdmg="overlay"]');
+  assert.ok(hostAfter);
+});
