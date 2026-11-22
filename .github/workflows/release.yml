@@ -30,6 +30,13 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: 解析仓库信息
+        id: repo
+        run: |
+          echo "owner=${GITHUB_REPOSITORY_OWNER}" >> "$GITHUB_OUTPUT"
+          echo "name=${GITHUB_REPOSITORY##*/}" >> "$GITHUB_OUTPUT"
+          echo "url=https://github.com/${GITHUB_REPOSITORY}" >> "$GITHUB_OUTPUT"
+
       - name: 准备 Node.js
         uses: actions/setup-node@v4
         with:
@@ -53,7 +60,7 @@ jobs:
       - name: 上传构建产物
         uses: actions/upload-artifact@v4
         with:
-          name: pwdmg-${{ github.ref_name }}
+          name: ${{ steps.repo.outputs.name }}-${{ github.ref_name }}
           path: |
             dist/pwdmg-chrome.zip
             dist/pwdmg-firefox.zip
@@ -65,13 +72,18 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          name: pwdmg ${{ github.ref_name }}
+          name: ${{ steps.repo.outputs.name }} ${{ github.ref_name }}
           tag_name: ${{ github.ref_name }}
           draft: false
           prerelease: false
           generate_release_notes: true
           fail_on_unmatched_files: true
           body: |
+            ## 仓库
+
+            源码：${{ steps.repo.outputs.url }}
+            说明：${{ steps.repo.outputs.url }}#readme
+
             ## 安装
 
             **Chrome / Edge**
@@ -95,7 +107,9 @@ jobs:
 
       - name: 汇总
         run: |
-          echo "### pwdmg ${{ github.ref_name }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "### ${{ steps.repo.outputs.name }} ${{ github.ref_name }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "${{ steps.repo.outputs.url }}" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
           cat dist/SHA256SUMS.txt >> "$GITHUB_STEP_SUMMARY"
