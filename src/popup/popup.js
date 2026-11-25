@@ -15,6 +15,7 @@
     url: '',
     host: '',
     entries: [],
+    filter: '',
     configured: true,
     encrypted: false,
     locked: false,
@@ -196,22 +197,46 @@
     setPersistentStatus(parts.join(' · '), false);
   }
 
+  /** 按用户名做包含匹配（逐字母输入即时筛选），大小写不敏感 */
+  function filterEntries(entries, query) {
+    const q = String(query || '').trim().toLowerCase();
+    if (!q) return entries;
+    return entries.filter((entry) => (entry.username || '').toLowerCase().includes(q));
+  }
+
   function renderEntries() {
     const list = el('entries');
     const count = el('count');
+    const filterRow = el('filter-row');
     list.textContent = '';
 
-    count.hidden = !state.entries.length || state.locked;
-    count.textContent = state.entries.length ? String(state.entries.length) : '';
-    list.hidden = !state.entries.length;
-    el('empty').hidden = !!state.entries.length || state.locked;
+    const hasEntries = !!state.entries.length && !state.locked;
+    count.hidden = !hasEntries;
+    count.textContent = hasEntries ? String(state.entries.length) : '';
+    // 账号太多时才需要筛选框，单个站点只有 0~1 个账号时没必要显示
+    filterRow.hidden = !hasEntries || state.entries.length < 2;
 
-    if (!state.entries.length) {
-      const first = el('empty').querySelector('p');
-      first.textContent = U.isWebUrl(state.url) ? '这个站点还没有保存的账号。' : '当前页面无法使用自动填充。';
+    const query = state.filter;
+    const filtered = filterEntries(state.entries, query);
+    list.hidden = !filtered.length;
+    el('empty').hidden = !!filtered.length || state.locked;
+
+    if (!filtered.length) {
+      const paras = el('empty').querySelectorAll('p');
+      const trimmed = String(query || '').trim();
+      if (!U.isWebUrl(state.url)) {
+        paras[0].textContent = '当前页面无法使用自动填充。';
+        if (paras[1]) paras[1].hidden = false;
+      } else if (trimmed) {
+        paras[0].textContent = '没有用户名包含“' + trimmed + '”的账号。';
+        if (paras[1]) paras[1].hidden = true;
+      } else {
+        paras[0].textContent = '这个站点还没有保存的账号。';
+        if (paras[1]) paras[1].hidden = false;
+      }
       return;
     }
-    for (const entry of state.entries) list.appendChild(renderEntry(entry));
+    for (const entry of filtered) list.appendChild(renderEntry(entry));
   }
 
   function renderEntry(entry) {
@@ -508,6 +533,10 @@
     }
   });
   el('options-btn').addEventListener('click', openOptions);
+  el('filter-input').addEventListener('input', (ev) => {
+    state.filter = ev.target.value;
+    renderEntries();
+  });
   el('add-toggle').addEventListener('click', openAdd);
   el('add-cancel').addEventListener('click', closeForm);
   el('add-form').addEventListener('submit', saveForm);
