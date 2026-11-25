@@ -211,6 +211,71 @@ test('弹窗：列出当前站点账号、显示密码、填充', { skip }, asyn
   dom.window.close();
 });
 
+test('弹窗：按用户名筛选账号列表（逐字母匹配，大小写不敏感）', { skip }, async () => {
+  const vaultList = {
+    ok: true,
+    configured: true,
+    dirty: false,
+    lastSyncAt: new Date().toISOString(),
+    lastError: null,
+    vault: VAULT,
+  };
+  const { chrome } = makeChrome({
+    sendMessage: async (message) => {
+      if (message.type === 'vault:list') return vaultList;
+      return { ok: true };
+    },
+  });
+
+  const dom = new JSDOM(read('src/popup/popup.html'), {
+    url: 'https://localhost/popup.html',
+    pretendToBeVisual: true,
+    runScripts: 'outside-only',
+  });
+  const { window } = dom;
+  window.chrome = chrome;
+  window.browser = undefined;
+  window.close = () => undefined;
+
+  window.eval(SHARED.api);
+  window.eval(SHARED.util);
+  window.eval(SHARED.vault);
+  window.eval(read('src/popup/popup.js'));
+
+  await until(() => window.document.querySelectorAll('.entry').length === 2, '渲染 2 条当前站点账号');
+
+  const filterRow = window.document.getElementById('filter-row');
+  const filterInput = window.document.getElementById('filter-input');
+  const uname = () => Array.from(window.document.querySelectorAll('.uname')).map((n) => n.textContent);
+
+  // 有 2 个及以上账号时才显示筛选框
+  assert.equal(filterRow.hidden, false);
+
+  // 逐字母输入：大小写不敏感的包含匹配
+  filterInput.value = 'AL';
+  filterInput.dispatchEvent(new window.Event('input', { bubbles: true }));
+  assert.deepEqual(uname(), ['alice']);
+  assert.equal(window.document.getElementById('entries').hidden, false);
+  assert.equal(window.document.getElementById('empty').hidden, true);
+  // 总数角标仍显示全部账号数，不受筛选影响
+  assert.equal(window.document.getElementById('count').textContent, '2');
+
+  // 没有匹配项时显示提示文案，而不是空列表
+  filterInput.value = 'zzz';
+  filterInput.dispatchEvent(new window.Event('input', { bubbles: true }));
+  assert.deepEqual(uname(), []);
+  assert.equal(window.document.getElementById('entries').hidden, true);
+  assert.equal(window.document.getElementById('empty').hidden, false);
+  assert.match(window.document.getElementById('empty').querySelector('p').textContent, /没有用户名包含/);
+
+  // 清空筛选框恢复完整列表
+  filterInput.value = '';
+  filterInput.dispatchEvent(new window.Event('input', { bubbles: true }));
+  assert.deepEqual(uname(), ['bob', 'alice']);
+
+  dom.window.close();
+});
+
 test('弹窗：未配置 WebDAV 时显示提示，可手动保存账号', { skip }, async () => {
   const vaultList = {
     ok: true,
@@ -258,6 +323,71 @@ test('弹窗：未配置 WebDAV 时显示提示，可手动保存账号', { skip
   assert.equal(saved[0].host, 'manual.example');
   assert.equal(saved[0].url, 'https://manual.example');
   assert.equal(saved[0].password, 'secret');
+
+  dom.window.close();
+});
+
+test('弹窗：手动添加表单默认不显示（hidden 不被 CSS 的 display 覆盖）', { skip }, async () => {
+  const vaultList = {
+    ok: true,
+    configured: true,
+    dirty: false,
+    lastSyncAt: new Date().toISOString(),
+    lastError: null,
+    vault: VAULT,
+  };
+  const { chrome } = makeChrome({
+    sendMessage: async (message) => {
+      if (message.type === 'vault:list') return vaultList;
+      return { ok: true };
+    },
+  });
+
+  const dom = new JSDOM(read('src/popup/popup.html'), {
+    url: 'https://localhost/popup.html',
+    pretendToBeVisual: true,
+    runScripts: 'outside-only',
+  });
+  const { window } = dom;
+  window.chrome = chrome;
+  window.browser = undefined;
+  window.close = () => undefined;
+
+  // 注入真实样式表：回归用例必须验证 computed display，不能只看 hidden 属性
+  const style = window.document.createElement('style');
+  style.textContent = read('src/popup/popup.css');
+  window.document.head.appendChild(style);
+
+  window.eval(SHARED.api);
+  window.eval(SHARED.util);
+  window.eval(SHARED.vault);
+  window.eval(read('src/popup/popup.js'));
+
+  await until(() => window.document.querySelectorAll('.entry').length === 2, '渲染账号列表');
+
+  const form = window.document.getElementById('add-form');
+  const toggle = window.document.getElementById('add-toggle');
+  const display = (node) => window.getComputedStyle(node).display;
+
+  // .form { display: flex } 曾盖过 [hidden]，导致表单平时一直显示
+  assert.equal(form.hidden, true);
+  assert.equal(display(form), 'none', '表单默认应不可见');
+  assert.equal(toggle.hidden, false);
+  assert.notEqual(display(toggle), 'none', '「手动添加」按钮应可见');
+
+  // 点击后展开，按钮隐藏
+  toggle.click();
+  assert.equal(form.hidden, false);
+  assert.equal(display(form), 'flex');
+  assert.equal(toggle.hidden, true);
+  assert.equal(display(toggle), 'none');
+
+  // 取消后收回
+  window.document.getElementById('add-cancel').click();
+  assert.equal(form.hidden, true);
+  assert.equal(display(form), 'none', '取消后表单应收起');
+  assert.equal(toggle.hidden, false);
+  assert.notEqual(display(toggle), 'none');
 
   dom.window.close();
 });

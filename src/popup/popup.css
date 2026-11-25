@@ -14,6 +14,13 @@
   box-sizing: border-box;
 }
 
+/* hidden 属性必须始终生效：下面的 .form / .banner / .lock-badge / .pw-line
+   等类都声明了 display，会盖过浏览器给 [hidden] 的默认 display:none
+   （作者样式表优先于用户代理样式表），导致「手动添加」表单平时也显示。 */
+[hidden] {
+  display: none !important;
+}
+
 html,
 body {
   margin: 0;
@@ -127,6 +134,28 @@ body {
   padding: 1px 8px;
   font-size: 11px;
   font-weight: 600;
+}
+
+.filter-row {
+  display: flex;
+  margin-top: 8px;
+}
+
+.filter-input {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 6px 9px;
+  font-size: 12px;
+  font-family: inherit;
+  color: var(--text);
+  background: var(--card);
+  outline: none;
+}
+
+.filter-input:focus {
+  border-color: #93c5fd;
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.14);
 }
 
 .entries {
