@@ -35,6 +35,7 @@
 
   const SYNC_ALARM = 'pwdmg-sync';
   const RETRY_ALARM = 'pwdmg-retry';
+  const AUTO_LOCK_ALARM = 'pwdmg-autolock';
   const BADGE_COLOR = { ok: '#2563eb', dirty: '#f59e0b', error: '#dc2626', locked: '#64748b' };
   const MIN_MASTER_PASSWORD = 8;
 
@@ -175,6 +176,13 @@
       } catch (err) {
         /* 会话密钥损坏，继续尝试本机记住的密钥 */
       }
+    }
+    // 共享电脑模式：禁止用「本机记住」的密钥自动恢复，必须手动输主密码解锁
+    try {
+      const settings = await S.getSettings();
+      if (settings && settings.sharedMode) return null;
+    } catch (err) {
+      /* ignore */
     }
     // 「记住本机」：会话密钥丢了（浏览器重启 / 新会话）时，用本地记住的密钥恢复，
     // 主密码不需要再输入。密钥过期或损坏时统一返回 null（保持锁定）。
@@ -827,6 +835,35 @@
   }
 
   /* ------------------------------------------------------------------ *
+   * 共享电脑模式：闲置自动锁定
+   *
+   * 解锁后挂一个一次性 alarm，autoLockMinutes 分钟后自动锁定。
+   * 每次解锁 / 设置变更都会重排；锁定后清除。未加密时不挂（没有可锁的东西）。
+   * ------------------------------------------------------------------ */
+
+  function clearAutoLock() {
+    try {
+      api.alarms.clear(AUTO_LOCK_ALARM);
+    } catch (err) {
+      /* ignore */
+    }
+  }
+
+  async function scheduleAutoLock() {
+    clearAutoLock();
+    try {
+      const settings = await S.getSettings();
+      if (!settings || !settings.sharedMode) return;
+      const c = await getCache();
+      if (!c || !c.encrypted || isLocked(c)) return;
+      const minutes = Math.min(Math.max(Number(settings.autoLockMinutes) || 5, 1), 60);
+      api.alarms.create(AUTO_LOCK_ALARM, { delayInMinutes: minutes });
+    } catch (err) {
+      /* ignore */
+    }
+  }
+
+  /* ------------------------------------------------------------------ *
    * 凭据记录（含“密码已变化”检测）
    * ------------------------------------------------------------------ */
 
@@ -960,7 +997,8 @@
    */
   async function rememberedStatus(c) {
     const settings = await S.getSettings();
-    const on = !!settings.rememberDevice;
+    // 共享电脑模式下「本机记住」被强制关闭，状态一律报未开启
+    const on = settings && settings.sharedMode ? false : !!settings.rememberDevice;
     const out = {
       on,
       days: Number(settings.rememberDeviceDays) || 0,
@@ -1013,7 +1051,10 @@
     await S.writeSessionKey(raw);
     try {
       const settings = await S.getSettings();
-      if (settings && settings.rememberDevice) {
+      if (settings && settings.sharedMode) {
+        // 共享电脑模式：绝不落盘记住密钥
+        await S.clearRememberedKey();
+      } else if (settings && settings.rememberDevice) {
         const days = Number(settings.rememberDeviceDays);
         // days <= 0 表示永久（直到手动锁定）
         await S.writeRememberedKey(raw, Number.isFinite(days) ? days : 7);
@@ -1109,6 +1150,8 @@
     // 解锁立即返回，同步在后台继续执行，避免因远端/写入慢而卡住界面
     requestSync().catch(() => undefined);
     notifyTabs();
+    // 共享电脑模式：解锁后挂闲置自动锁定
+    scheduleAutoLock().catch(() => undefined);
     return {
       ok: true,
       encrypted: true,
@@ -1118,6 +1161,7 @@
   }
 
   async function lockVault() {
+    clearAutoLock();
     const c = await getCache();
     if (!c.encrypted) return { ok: false, error: '密码库未启用加密' };
     await persist(); // 先确保密文是最新的
@@ -1353,6 +1397,8 @@
         kdfIterations: c.kdf ? c.kdf.iterations : null,
         notice: c.notice || '',
         remember: await rememberedStatus(c),
+        sharedMode: !!settings.sharedMode,
+        autoLockMinutes: settings.autoLockMinutes,
       };
     },
 
@@ -1424,6 +1470,8 @@
           autoOpenPanel: settings.autoOpenPanel,
           autoFillSingle: settings.autoFillSingle,
           confirmPasswordChange: settings.confirmPasswordChange,
+          sharedMode: !!settings.sharedMode,
+          autoLockMinutes: settings.autoLockMinutes,
         },
         entries: entries.map((e) => ({
           id: e.id,
@@ -1520,7 +1568,11 @@
           syncIntervalMin: settings.syncIntervalMin,
           encryptVault: settings.encryptVault,
           lastExportAt: settings.lastExportAt,
+          sharedMode: !!settings.sharedMode,
+          autoLockMinutes: settings.autoLockMinutes,
         },
+        sharedMode: !!settings.sharedMode,
+        autoLockMinutes: settings.autoLockMinutes,
       };
     },
 
@@ -1728,6 +1780,11 @@
     },
 
     async 'vault:rememberDevice'(message) {
+      const before = await S.getSettings();
+      if (before && before.sharedMode) {
+        await S.clearRememberedKey().catch(() => undefined);
+        return { ok: false, error: '共享电脑模式下无法开启“本机记住”', settings: before };
+      }
       const remember = !!(message && message.remember);
       const daysRaw = Number(message && message.days);
       const days = remember && Number.isFinite(daysRaw) && daysRaw >= 0 ? Math.min(Math.round(daysRaw), 365) : 7;
@@ -1750,6 +1807,25 @@
       await setupAlarm();
       await refreshBadge();
       const settings = await S.getSettings();
+      if (settings && settings.sharedMode) {
+        await S.clearRememberedKey().catch(() => undefined);
+        // 已强制关闭的本地行为无需额外动作，normalizeSettings 已保证
+        const cLock = await getCache();
+        if (cLock && cLock.encrypted && !isLocked(cLock)) {
+          await scheduleAutoLock().catch(() => undefined);
+        } else {
+          clearAutoLock();
+        }
+      } else {
+        // 退出共享模式：若仍是解锁态，清理掉残留的自动锁定闹钟
+        const c2 = await getCache();
+        if (!settings.sharedMode && c2 && c2.encrypted && isLocked(c2)) clearAutoLock();
+        // 未开启共享模式时，若当前无自动锁定需求也清理
+        try {
+          const s2 = await S.getSettings();
+          if (!s2.sharedMode) clearAutoLock();
+        } catch (err) { /* ignore */ }
+      }
       if (settings.webdavUrl) {
         const c = await getCache();
         if (!isLocked(c)) requestSync().catch(() => undefined);
@@ -1794,6 +1870,19 @@
   });
 
   api.alarms.onAlarm.addListener((alarm) => {
+    if (alarm.name === AUTO_LOCK_ALARM) {
+      // 共享电脑模式下的闲置自动锁定
+      (async () => {
+        try {
+          const settings = await S.getSettings();
+          if (!settings || !settings.sharedMode) return;
+          const c = await getCache();
+          if (!c || !c.encrypted || isLocked(c)) return;
+          await lockVault();
+        } catch (err) { /* ignore */ }
+      })();
+      return;
+    }
     if (alarm.name === SYNC_ALARM || alarm.name === RETRY_ALARM) {
       syncNow().then((result) => {
         if (!result.ok && result.configured && !result.locked) scheduleRetry();
@@ -1808,11 +1897,20 @@
       if (area === 'local' && changes.settings) {
         setupAlarm().catch(() => undefined);
         refreshBadge().catch(() => undefined);
+        // 共享模式切换时重排自动锁定
+        (async () => {
+          try {
+            const settings = await S.getSettings();
+            if (settings && settings.sharedMode) await scheduleAutoLock();
+            else clearAutoLock();
+          } catch (err) { /* ignore */ }
+        })();
       }
     });
   }
 
   setupAlarm()
     .then(() => refreshBadge())
+    .then(() => scheduleAutoLock())
     .catch(() => undefined);
 })();

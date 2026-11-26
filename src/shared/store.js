@@ -44,6 +44,9 @@
     lastExportAt: '',
     rememberDevice: false,
     rememberDeviceDays: 7,
+    // 共享电脑模式：别人也会用这台电脑时开启，强制关闭自动暴露与本机记住
+    sharedMode: false,
+    autoLockMinutes: 5,
   };
 
   function clampNumber(value, min, max, fallback) {
@@ -54,7 +57,8 @@
 
   function normalizeSettings(raw) {
     const s = Object.assign({}, DEFAULT_SETTINGS, raw || {});
-    return {
+    const sharedMode = !!s.sharedMode;
+    const out = {
       webdavUrl: String(s.webdavUrl || '').trim(),
       username: String(s.username || ''),
       password: String(s.password || ''),
@@ -72,7 +76,17 @@
       syncIntervalMin: clampNumber(s.syncIntervalMin, 1, 1440, 15),
       rememberDevice: s.rememberDevice !== undefined ? !!s.rememberDevice : Number(s.rememberDeviceDays) > 0,
       rememberDeviceDays: clampNumber(s.rememberDeviceDays, 0, 365, 7),
+      sharedMode,
+      autoLockMinutes: clampNumber(s.autoLockMinutes, 1, 60, 5),
     };
+    // 共享电脑模式：强制关闭一切“自动暴露”与“本机记住”，避免别人一打开页面就看到账号
+    if (sharedMode) {
+      out.autoPrompt = false;
+      out.autoOpenPanel = false;
+      out.autoFillSingle = false;
+      out.rememberDevice = false;
+    }
+    return out;
   }
 
   async function getSettings() {

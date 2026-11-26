@@ -155,6 +155,19 @@
 
       <section class="card">
         <h2>3 · 记录与填充</h2>
+        <!-- 共享电脑模式：一个总开关，勾上就自动关掉会“暴露密码”的几项 -->
+        <div class="shared-box" style="border:1px solid var(--line);background:var(--primary-weak);border-radius:10px;padding:12px 12px 10px;margin-bottom:12px">
+          <label class="check" style="padding:0 0 4px">
+            <input id="opt-shared" type="checkbox" />
+            <span><b>共享电脑模式</b>：这台电脑别人也会用（勾选开启）</span>
+          </label>
+          <p class="hint" style="margin:0 0 8px 23px">开启后会<b>自动关闭</b>「自动提示 / 自动展开面板 / 自动填充」和「本机记住」，别人打开登录页不会直接看到账号列表或被自动填入；需在下方设置闲置多久后自动锁定（仅在已启用主密码加密时生效）。</p>
+          <label class="remember-days" style="margin-left:23px">
+            <span>闲置自动锁定（分钟）</span>
+            <input id="opt-autolock" type="number" min="1" max="60" step="1" value="5" />
+          </label>
+          <p class="hint" style="margin:6px 0 0 23px" id="shared-hint"></p>
+        </div>
         <label class="check">
           <input id="opt-autosave" type="checkbox" />
           <span><b>自动记录</b>：提交登录表单时保存用户名和密码</span>
