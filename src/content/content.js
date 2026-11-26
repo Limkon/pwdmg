@@ -164,6 +164,8 @@
       autoOpenPanel: true,
       autoFillSingle: true,
       confirmPasswordChange: true,
+      sharedMode: false,
+      autoLockMinutes: 5,
     },
     entries: [],
     host: '',
@@ -1716,6 +1718,12 @@
     if (!res || !res.ok) return;
 
     state.settings = Object.assign({}, state.settings, res.settings || {});
+    // 共享电脑模式在后台已强制关闭自动暴露，前端再兜底一次，避免缓存或旧设置残留
+    if (state.settings.sharedMode) {
+      state.settings.autoPrompt = false;
+      state.settings.autoOpenPanel = false;
+      state.settings.autoFillSingle = false;
+    }
     state.entries = Array.isArray(res.entries) ? res.entries : [];
     // 页面上已经填了账号（比如「先输账号 → 下一步」）时，把对应记录排到最前
     state.entries = rankEntriesForPage(state.entries);

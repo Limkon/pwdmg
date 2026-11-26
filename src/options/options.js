@@ -162,6 +162,47 @@
 
   /* ------------------------------ 行为设置 ------------------------------ */
 
+  function updateSharedUi(settings) {
+    const shared = !!(settings && settings.sharedMode);
+    const minutes = settings && Number(settings.autoLockMinutes) ? Math.min(Math.max(Math.round(Number(settings.autoLockMinutes)), 1), 60) : 5;
+    const chkShared = el('opt-shared');
+    const inputLock = el('opt-autolock');
+    const hint = el('shared-hint');
+    if (chkShared) chkShared.checked = shared;
+    if (inputLock) {
+      inputLock.value = String(minutes);
+      inputLock.disabled = !shared;
+    }
+    // 共享模式下强制关闭的几项：禁用并置为未勾选，手感上“关掉了”
+    const depIds = ['opt-autoprompt', 'opt-autoopen', 'opt-autofill'];
+    depIds.forEach((id) => {
+      const node = el(id);
+      if (!node) return;
+      node.disabled = shared;
+      if (shared) node.checked = false;
+    });
+    // 本机记住也强制关闭
+    const rChk = el('enc-remember-chk');
+    const rDays = el('enc-remember-days');
+    if (shared && rChk) {
+      rChk.checked = false;
+      rChk.disabled = true;
+      if (rDays) rDays.disabled = true;
+    } else if (!shared && rChk) {
+      rChk.disabled = false;
+      if (rDays) rDays.disabled = !rChk.checked;
+    }
+    if (hint) {
+      if (shared) {
+        hint.textContent = '已开启：自动提示/展开/填充与本机记住已关闭，闲置 ' + minutes + ' 分钟后自动锁定（仅加密已启用时生效）。';
+        hint.dataset.state = 'ok';
+      } else {
+        hint.textContent = '';
+        delete hint.dataset.state;
+      }
+    }
+  }
+
   function fillBehavior(settings) {
     el('opt-autosave').checked = !!settings.autoSave;
     el('opt-autoprompt').checked = !!settings.autoPrompt;
@@ -173,25 +214,38 @@
     el('enc-remember-chk').checked = !!settings.rememberDevice;
     el('enc-remember-days').value = String(Number(settings.rememberDeviceDays) || 7);
     el('enc-remember-days').disabled = !settings.rememberDevice;
+    updateSharedUi(settings);
   }
 
   function collectBehavior() {
+    const shared = !!(el('opt-shared') && el('opt-shared').checked);
+    const rawLock = Number(el('opt-autolock') && el('opt-autolock').value);
     return {
       autoSave: el('opt-autosave').checked,
-      autoPrompt: el('opt-autoprompt').checked,
-      autoOpenPanel: el('opt-autoopen').checked,
-      autoFillSingle: el('opt-autofill').checked,
+      autoPrompt: shared ? false : el('opt-autoprompt').checked,
+      autoOpenPanel: shared ? false : el('opt-autoopen').checked,
+      autoFillSingle: shared ? false : el('opt-autofill').checked,
       confirmPasswordChange: el('opt-confirm-change').checked,
       syncIntervalMin: Number(el('opt-interval').value) || 15,
       noIfMatch: el('opt-noifmatch').checked,
+      sharedMode: shared,
+      autoLockMinutes: Number.isFinite(rawLock) ? Math.min(Math.max(Math.round(rawLock), 1), 60) : 5,
     };
   }
 
   const saveBehavior = async () => {
-    state.settings = await Store.saveSettings(collectBehavior());
+    const patch = collectBehavior();
+    // 实时更新本地 UI 的禁用态，手感更直观
+    updateSharedUi(Object.assign({}, state.settings || {}, patch));
+    state.settings = await Store.saveSettings(patch);
+    // 共享模式开启后，后台已强制关闭的字段要同步回本地展示
+    fillBehavior(state.settings);
     await sendMessage({ type: 'settings:changed' });
     const hint = el('behavior-hint');
     hint.textContent = '已保存 · ' + new Date().toLocaleTimeString();
+    // 刷新“本机记住”一行的真实状态（共享模式下已强制关闭）
+    const status = await sendMessage({ type: 'vault:rememberStatus' }).catch(() => null);
+    if (status && status.ok) renderRemember(status.remember);
   };
 
   /* ------------------------------ 主密码加密 ------------------------------ */
@@ -800,6 +854,23 @@
       setResult(el('sync-status'), '后台未响应，请重新加载扩展', 'error');
       return;
     }
+    // 后台返回的 settings 包含最新的共享电脑模式状态，同步到本地以驱动 UI 禁用态
+    if (res.settings) {
+      state.settings = res.settings;
+      updateSharedUi(state.settings);
+      // 同时校正“本机记住”勾选框的禁用态
+      const rChk = el('enc-remember-chk');
+      const rDays = el('enc-remember-days');
+      if (state.settings.sharedMode) {
+        if (rChk) { rChk.checked = false; rChk.disabled = true; }
+        if (rDays) rDays.disabled = true;
+      }
+    } else if (res.sharedMode !== undefined) {
+      if (!state.settings) state.settings = await Store.getSettings();
+      state.settings.sharedMode = !!res.sharedMode;
+      if (res.autoLockMinutes) state.settings.autoLockMinutes = res.autoLockMinutes;
+      updateSharedUi(state.settings);
+    }
     state.vault = Vault.normalize(res.vault);
     renderNotice(res.notice);
     state.encryption = {
@@ -860,6 +931,14 @@
   el('enc-enable-btn').addEventListener('click', enableEncryption);
   el('enc-unlock-btn').addEventListener('click', unlockEncryption);
   async function applyRememberDevice() {
+    // 共享电脑模式下禁止操作本机记住
+    if (state.settings && state.settings.sharedMode) {
+      setMsg('enc-remember-msg', '共享电脑模式下已自动关闭“本机记住”', 'warn');
+      el('enc-remember-chk').checked = false;
+      el('enc-remember-chk').disabled = true;
+      el('enc-remember-days').disabled = true;
+      return;
+    }
     const remember = !!el('enc-remember-chk').checked;
     const rawDays = Number(el('enc-remember-days').value);
     const days = Number.isFinite(rawDays) ? rawDays : 7;
@@ -902,9 +981,17 @@
     if (file) await importVault(file);
   });
 
-  ['opt-autosave', 'opt-autoprompt', 'opt-autoopen', 'opt-autofill', 'opt-confirm-change'].forEach((id) => {
-    el(id).addEventListener('change', saveBehavior);
+  ['opt-autosave', 'opt-autoprompt', 'opt-autoopen', 'opt-autofill', 'opt-confirm-change', 'opt-noifmatch'].forEach((id) => {
+    const node = el(id);
+    if (node) node.addEventListener('change', saveBehavior);
   });
+  const sharedNode = el('opt-shared');
+  if (sharedNode) sharedNode.addEventListener('change', saveBehavior);
+  const lockNode = el('opt-autolock');
+  if (lockNode) {
+    lockNode.addEventListener('change', saveBehavior);
+    lockNode.addEventListener('blur', saveBehavior);
+  }
   el('opt-interval').addEventListener('change', saveBehavior);
 
   const onSearch = U.debounce(() => {
