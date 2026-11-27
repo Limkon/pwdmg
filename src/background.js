@@ -838,7 +838,15 @@
    * 共享电脑模式：闲置自动锁定
    *
    * 解锁后挂一个一次性 alarm，autoLockMinutes 分钟后自动锁定。
-   * 每次解锁 / 设置变更都会重排；锁定后清除。未加密时不挂（没有可锁的东西）。
+   * 解锁 / 设置变更会强制重排（force: true）；锁定后清除。未加密时不挂（没有可锁的东西）。
+   *
+   * MV3 的 service worker 没有活动就会被系统回收，之后任何事件（周期同步 /
+   * 同步失败重试 / 页面消息……）都会把整份脚本重新跑一遍，包括文件末尾那次
+   * 兜底的 scheduleAutoLock() 调用。如果这次兜底调用也无条件清掉重挂 alarm，
+   * 倒计时就会被这些后台杂事不断续命，导致“设置了闲置锁定，但挂着页面一直
+   * 不操作也永远不锁”。chrome.alarms 本身在 service worker 重启、甚至浏览器
+   * 重启之间都会持续存在并按时触发，所以兜底调用只需要在 alarm 确实丢失时才
+   * 补一个，已经在倒计时的 alarm 不该被打断重置。
    * ------------------------------------------------------------------ */
 
   function clearAutoLock() {
@@ -849,13 +857,23 @@
     }
   }
 
-  async function scheduleAutoLock() {
-    clearAutoLock();
+  async function scheduleAutoLock(options) {
+    const force = !!(options && options.force);
     try {
       const settings = await S.getSettings();
-      if (!settings || !settings.sharedMode) return;
       const c = await getCache();
-      if (!c || !c.encrypted || isLocked(c)) return;
+      const eligible = !!(settings && settings.sharedMode && c && c.encrypted && !isLocked(c));
+      if (!eligible) {
+        clearAutoLock();
+        return;
+      }
+      if (force) {
+        clearAutoLock();
+      } else {
+        // 非强制：只在还没有倒计时的时候才补挂一个，不打断已经在跑的倒计时
+        const existing = await api.alarms.get(AUTO_LOCK_ALARM).catch(() => null);
+        if (existing) return;
+      }
       const minutes = Math.min(Math.max(Number(settings.autoLockMinutes) || 5, 1), 60);
       api.alarms.create(AUTO_LOCK_ALARM, { delayInMinutes: minutes });
     } catch (err) {
@@ -1150,8 +1168,8 @@
     // 解锁立即返回，同步在后台继续执行，避免因远端/写入慢而卡住界面
     requestSync().catch(() => undefined);
     notifyTabs();
-    // 共享电脑模式：解锁后挂闲置自动锁定
-    scheduleAutoLock().catch(() => undefined);
+    // 共享电脑模式：解锁后挂闲置自动锁定（刚解锁，强制给一个全新的倒计时）
+    scheduleAutoLock({ force: true }).catch(() => undefined);
     return {
       ok: true,
       encrypted: true,
@@ -1812,7 +1830,8 @@
         // 已强制关闭的本地行为无需额外动作，normalizeSettings 已保证
         const cLock = await getCache();
         if (cLock && cLock.encrypted && !isLocked(cLock)) {
-          await scheduleAutoLock().catch(() => undefined);
+          // 用户在设置页改了分钟数 / 刚打开共享模式：按新值重新起算
+          await scheduleAutoLock({ force: true }).catch(() => undefined);
         } else {
           clearAutoLock();
         }
@@ -1897,11 +1916,11 @@
       if (area === 'local' && changes.settings) {
         setupAlarm().catch(() => undefined);
         refreshBadge().catch(() => undefined);
-        // 共享模式切换时重排自动锁定
+        // 共享模式切换 / 改了闲置分钟数时重排自动锁定（都是用户显式保存设置触发的）
         (async () => {
           try {
             const settings = await S.getSettings();
-            if (settings && settings.sharedMode) await scheduleAutoLock();
+            if (settings && settings.sharedMode) await scheduleAutoLock({ force: true });
             else clearAutoLock();
           } catch (err) { /* ignore */ }
         })();
@@ -1911,6 +1930,8 @@
 
   setupAlarm()
     .then(() => refreshBadge())
+    // 脚本每次被系统重新唤醒都会跑到这里：不能传 force，否则周期同步 /
+    // 失败重试等后台杂事会不断把倒计时续命，导致闲置锁定永远不触发。
     .then(() => scheduleAutoLock())
     .catch(() => undefined);
 })();
