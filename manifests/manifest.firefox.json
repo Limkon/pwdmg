@@ -14,7 +14,8 @@
     "storage",
     "activeTab",
     "scripting",
-    "alarms"
+    "alarms",
+    "idle"
   ],
   "host_permissions": [
     "http://*/*",
