@@ -7,7 +7,7 @@ npm run release -- <版本号> --tag
 git push origin HEAD --follow-tags
 ```
 
-## [未发布]
+## [1.8.0] - 2026-11-24
 
 ### 改进：共享电脑模式的「闲置自动锁定」改为真正的活动闲置检测
 
