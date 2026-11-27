@@ -109,7 +109,11 @@
       if (ts && U.toMs(ts) >= U.toMs(entry.updatedAt)) byId.delete(id);
     }
 
-    // 同一站点 + 同一用户名 视为同一条记录
+    // 同一站点 + 同一用户名 视为同一条记录。
+    // 用 >=（而不是 >）判断新旧：两次写入发生在同一毫秒内时间戳会相等
+    // （自动记录和手工在设置页改同一账号几乎总是前后脚发生，测试里更是
+    // 常见），这种情况下应该认后写入的那条（在数组里排在后面）生效，
+    // 否则谁赢纯粹看 Map 的历史迭代顺序，结果就会随机抖动。
     const deduped = new Map();
     for (const entry of byId.values()) {
       const key = entry.host + '\u0000' + entry.username.trim().toLowerCase();
@@ -118,7 +122,7 @@
         deduped.set(key, entry);
         continue;
       }
-      const keep = U.toMs(entry.updatedAt) > U.toMs(prev.updatedAt) ? entry : prev;
+      const keep = U.toMs(entry.updatedAt) >= U.toMs(prev.updatedAt) ? entry : prev;
       const drop = keep === entry ? prev : entry;
       keep.useCount = Math.max(keep.useCount, drop.useCount);
       tombstones[drop.id] = U.nowIso();
@@ -477,7 +481,7 @@
         byId.set(entry.id, entry);
         continue;
       }
-      const newer = U.toMs(entry.updatedAt) >= U.toMs(prev.updatedAt) ? entry : prev;
+      const newer = U.toMs(entry.updatedAt) > U.toMs(prev.updatedAt) ? entry : prev;
       const older = newer === entry ? prev : entry;
       byId.set(entry.id, Object.assign({}, newer, { useCount: Math.max(newer.useCount, older.useCount) }));
     }
