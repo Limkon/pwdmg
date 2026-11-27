@@ -438,3 +438,80 @@ test('地址只填到目录时，测试连接和保存都落到 vault.json', asy
   assert.equal(server.dirs.has('/pwdmg/'), true);
   assert.equal(server.files.get('/pwdmg/vault.json').content.includes('pw-dir'), true);
 });
+
+/* ------------------------------------------------------------------ *
+ * 共享电脑模式：闲置自动锁定
+ *
+ * 回归用例：service worker 被系统回收后，任何后台事件（周期同步 / 失败重试 /
+ * 别的消息）唤醒它重新跑脚本时，不应该把已经在跑的倒计时重置掉，否则只要后台
+ * 一直有动静，闲置锁定就永远不会触发——这正是真实反馈的 bug（设置了 15
+ * 分钟闲置锁定，页面挂着不操作，超过 15 分钟也不锁定）。
+ * ------------------------------------------------------------------ */
+
+const AUTO_LOCK_ALARM = 'pwdmg-autolock';
+const MASTER = 'master-pass-123';
+
+test('共享电脑模式：解锁后按闲置分钟数挂自动锁定闹钟', async (t) => {
+  const fake = loadBackground();
+  fake.store.set('settings', {}); // 未配置 WebDAV，纯本地也要能用
+
+  const enabled = await fake.send({ type: 'vault:enableEncryption', password: MASTER });
+  assert.equal(enabled.ok, true, enabled.error);
+
+  fake.store.set('settings', { sharedMode: true, autoLockMinutes: 15 });
+  await fake.send({ type: 'settings:changed' });
+
+  await waitFor(() => fake.alarms.get(AUTO_LOCK_ALARM), { label: '自动锁定闹钟' });
+  assert.equal(fake.alarms.get(AUTO_LOCK_ALARM).delayInMinutes, 15);
+});
+
+test('共享电脑模式：service worker 被系统唤醒重跑脚本不应重置闲置倒计时', async (t) => {
+  const fake = loadBackground();
+  fake.store.set('settings', {});
+  await fake.send({ type: 'vault:enableEncryption', password: MASTER });
+  fake.store.set('settings', { sharedMode: true, autoLockMinutes: 15 });
+  await fake.send({ type: 'settings:changed' });
+  await waitFor(() => fake.alarms.get(AUTO_LOCK_ALARM), { label: '自动锁定闹钟' });
+  assert.equal(fake.alarms.get(AUTO_LOCK_ALARM).delayInMinutes, 15);
+
+  // 模拟 service worker 被系统回收后重新唤醒（比如周期同步 / 失败重试触发）：
+  // chrome.storage.session 和 chrome.alarms 是浏览器维护的，不会因为脚本
+  // 重新执行而丢失；只有内存状态会清空，所以要把它们一起带进新的「实例」。
+  const fresh = loadBackground({ store: fake.store, session: fake.session, alarms: fake.alarms });
+  const status = await fresh.send({ type: 'vault:status' });
+  assert.equal(status.locked, false, '会话密钥应该从 storage.session 恢复，不需要重新解锁');
+
+  // 等脚本末尾的兜底 scheduleAutoLock() 跑完：这次重新执行完全不应该碰这个闹钟
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  const touched = fresh.alarmCalls.filter((c) => c.name === AUTO_LOCK_ALARM);
+  assert.deepEqual(touched, [], 'service worker 被动唤醒不应该清除/重建已经在跑的闲置倒计时');
+  assert.equal(fresh.alarms.get(AUTO_LOCK_ALARM).delayInMinutes, 15, '倒计时时长应保持不变');
+});
+
+test('共享电脑模式：在设置页改闲置分钟数，会按新值强制重排倒计时', async (t) => {
+  const fake = loadBackground();
+  fake.store.set('settings', {});
+  await fake.send({ type: 'vault:enableEncryption', password: MASTER });
+  fake.store.set('settings', { sharedMode: true, autoLockMinutes: 15 });
+  await fake.send({ type: 'settings:changed' });
+  await waitFor(() => fake.alarms.get(AUTO_LOCK_ALARM), { label: '自动锁定闹钟' });
+  assert.equal(fake.alarms.get(AUTO_LOCK_ALARM).delayInMinutes, 15);
+
+  fake.store.set('settings', { sharedMode: true, autoLockMinutes: 30 });
+  await fake.send({ type: 'settings:changed' });
+  await waitFor(() => fake.alarms.get(AUTO_LOCK_ALARM).delayInMinutes === 30, { label: '按新分钟数重排' });
+  assert.equal(fake.alarms.get(AUTO_LOCK_ALARM).delayInMinutes, 30);
+});
+
+test('共享电脑模式：锁定后清除闲置自动锁定闹钟', async (t) => {
+  const fake = loadBackground();
+  fake.store.set('settings', {});
+  await fake.send({ type: 'vault:enableEncryption', password: MASTER });
+  fake.store.set('settings', { sharedMode: true, autoLockMinutes: 5 });
+  await fake.send({ type: 'settings:changed' });
+  await waitFor(() => fake.alarms.get(AUTO_LOCK_ALARM), { label: '自动锁定闹钟' });
+
+  const locked = await fake.send({ type: 'vault:lock' });
+  assert.equal(locked.ok, true, locked.error);
+  assert.equal(fake.alarms.get(AUTO_LOCK_ALARM), undefined, '锁定后应清掉倒计时闹钟');
+});

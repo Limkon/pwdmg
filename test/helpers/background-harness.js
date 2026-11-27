@@ -15,6 +15,7 @@ function createFakeBrowserApi() {
   const store = new Map();
   const session = new Map();
   const alarms = new Map();
+  const alarmCalls = []; // { type: 'create' | 'clear', name, info? }：排查「倒计时被谁重置了」用
   const listeners = { message: [], alarm: [], installed: [], startup: [], storageChanged: [] };
   const tabsSent = [];
 
@@ -68,9 +69,15 @@ function createFakeBrowserApi() {
     },
     alarms: {
       create: (name, info) => {
+        alarmCalls.push({ type: 'create', name, info: info || {} });
         alarms.set(name, info || {});
       },
-      clear: async (name) => alarms.delete(name),
+      get: async (name) => (alarms.has(name) ? Object.assign({ name }, alarms.get(name)) : undefined),
+      clear: async (name) => {
+        const existed = alarms.delete(name);
+        if (existed) alarmCalls.push({ type: 'clear', name });
+        return existed;
+      },
       onAlarm: { addListener: (fn) => listeners.alarm.push(fn) },
     },
     action: {
@@ -109,7 +116,7 @@ function createFakeBrowserApi() {
     });
   }
 
-  return { api, store, session, alarms, listeners, tabsSent, send };
+  return { api, store, session, alarms, alarmCalls, listeners, tabsSent, send };
 }
 
 /**
@@ -122,6 +129,19 @@ function loadBackground(options) {
   if (options && options.store) {
     for (const [key, value] of options.store.entries()) {
       fake.store.set(key, JSON.parse(JSON.stringify(value)));
+    }
+  }
+  // 模拟「service worker 被系统回收后重新唤醒」（不是整个浏览器重启）：
+  // chrome.storage.session 和 chrome.alarms 都是浏览器维护的，不会因为
+  // service worker 重新执行脚本而丢失，只有内存里的 JS 状态会清空。
+  if (options && options.session) {
+    for (const [key, value] of options.session.entries()) {
+      fake.session.set(key, JSON.parse(JSON.stringify(value)));
+    }
+  }
+  if (options && options.alarms) {
+    for (const [key, value] of options.alarms.entries()) {
+      fake.alarms.set(key, JSON.parse(JSON.stringify(value)));
     }
   }
   globalThis.chrome = fake.api;
