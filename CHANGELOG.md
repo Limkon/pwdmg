@@ -7,7 +7,7 @@ npm run release -- <版本号> --tag
 git push origin HEAD --follow-tags
 ```
 
-## [未发布]
+## [1.7.1] - 2026-11-27
 
 ### 修复：共享电脑模式下「闲置自动锁定」有时永远不触发
 
