@@ -16,7 +16,8 @@ function createFakeBrowserApi() {
   const session = new Map();
   const alarms = new Map();
   const alarmCalls = []; // { type: 'create' | 'clear', name, info? }：排查「倒计时被谁重置了」用
-  const listeners = { message: [], alarm: [], installed: [], startup: [], storageChanged: [] };
+  const idle = { current: 'active', detectionInterval: 60 };
+  const listeners = { message: [], alarm: [], installed: [], startup: [], storageChanged: [], idleState: [] };
   const tabsSent = [];
 
   const deepClone = (value) => (value === undefined ? undefined : JSON.parse(JSON.stringify(value)));
@@ -94,7 +95,20 @@ function createFakeBrowserApi() {
     },
     permissions: { contains: async () => true, request: async () => true },
     scripting: { executeScript: async () => [] },
+    idle: {
+      setDetectionInterval: (seconds) => {
+        idle.detectionInterval = seconds;
+      },
+      queryState: async () => idle.current,
+      onStateChanged: { addListener: (fn) => listeners.idleState.push(fn) },
+    },
   };
+
+  /** 模拟系统闲置状态变化：既更新「当前状态」，也像真实浏览器一样派发事件 */
+  function triggerIdle(state) {
+    idle.current = state;
+    for (const fn of listeners.idleState) fn(state);
+  }
 
   function send(message, sender) {
     return new Promise((resolve) => {
@@ -116,7 +130,7 @@ function createFakeBrowserApi() {
     });
   }
 
-  return { api, store, session, alarms, alarmCalls, listeners, tabsSent, send };
+  return { api, store, session, alarms, alarmCalls, idle, triggerIdle, listeners, tabsSent, send };
 }
 
 /**
@@ -143,6 +157,13 @@ function loadBackground(options) {
     for (const [key, value] of options.alarms.entries()) {
       fake.alarms.set(key, JSON.parse(JSON.stringify(value)));
     }
+  }
+  // chrome.idle 的「当前状态」同样是浏览器维护的，不会因为脚本重新执行而
+  // 重置回 active；用来模拟「状态变化恰好发生在 service worker 被回收期间，
+  // 错过了 onStateChanged 事件」这种场景。
+  if (options && options.idle) {
+    fake.idle.current = options.idle.current;
+    fake.idle.detectionInterval = options.idle.detectionInterval;
   }
   globalThis.chrome = fake.api;
   globalThis.browser = undefined;

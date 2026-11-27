@@ -35,7 +35,7 @@
 
   const SYNC_ALARM = 'pwdmg-sync';
   const RETRY_ALARM = 'pwdmg-retry';
-  const AUTO_LOCK_ALARM = 'pwdmg-autolock';
+  const MIN_IDLE_SECONDS = 15; // chrome.idle / browser.idle 允许的最小检测间隔
   const BADGE_COLOR = { ok: '#2563eb', dirty: '#f59e0b', error: '#dc2626', locked: '#64748b' };
   const MIN_MASTER_PASSWORD = 8;
 
@@ -835,50 +835,70 @@
   }
 
   /* ------------------------------------------------------------------ *
-   * 共享电脑模式：闲置自动锁定
+   * 共享电脑模式：闲置自动锁定（真正的活动闲置检测）
    *
-   * 解锁后挂一个一次性 alarm，autoLockMinutes 分钟后自动锁定。
-   * 解锁 / 设置变更会强制重排（force: true）；锁定后清除。未加密时不挂（没有可锁的东西）。
+   * 用 chrome.idle / browser.idle：系统级监测键盘 / 鼠标有没有输入，
+   * 跟倒计时无关——只要用户还在操作（不管在哪个标签页、哪个程序），状态就
+   * 一直是 active；真的停手不动超过 autoLockMinutes 分钟，状态变成 idle
+   * （或者锁屏变成 locked）才触发锁定。
    *
-   * MV3 的 service worker 没有活动就会被系统回收，之后任何事件（周期同步 /
-   * 同步失败重试 / 页面消息……）都会把整份脚本重新跑一遍，包括文件末尾那次
-   * 兜底的 scheduleAutoLock() 调用。如果这次兜底调用也无条件清掉重挂 alarm，
-   * 倒计时就会被这些后台杂事不断续命，导致“设置了闲置锁定，但挂着页面一直
-   * 不操作也永远不锁”。chrome.alarms 本身在 service worker 重启、甚至浏览器
-   * 重启之间都会持续存在并按时触发，所以兜底调用只需要在 alarm 确实丢失时才
-   * 补一个，已经在倒计时的 alarm 不该被打断重置。
+   * - setDetectionInterval()：告诉浏览器按多少秒算「闲置」，分钟数改了就
+   *   要重新设置一次（在「解锁」「设置变更」「脚本重新执行」时都会调用）。
+   * - onStateChanged：状态变化时浏览器会主动唤醒 service worker 派发事件，
+   *   不需要自己弄轮询或者计时器。
+   * - 保险起见，脚本每次被系统唤醒（周期同步 / 消息等任意事件）时，额外主动
+   *   查一次当前状态（queryState）：万一状态变化恰好发生在 service worker
+   *   被回收的间隙、错过了 onStateChanged 事件，也能在下次被唤醒时补上。
+   * - 只有共享模式 + 已加密 + 当前解锁中才会真的触发锁定；没开共享模式或者
+   *   没加密时，就算系统真的闲置了也什么都不做。
+   * - 浏览器被整个关掉再打开：这个 API 本来就没法在浏览器没跑的时候继续计
+   *   时，但共享模式下「本机记住」已经被强制关闭、解锁用的会话密钥只存在
+   *   chrome.storage.session 里（浏览器一退出就清空），所以重新打开浏览器
+   *   本来就是锁定状态，不需要额外处理。
    * ------------------------------------------------------------------ */
 
-  function clearAutoLock() {
+  function idleThresholdSeconds(settings) {
+    const minutes = Math.min(Math.max(Number(settings && settings.autoLockMinutes) || 5, 1), 60);
+    return Math.max(MIN_IDLE_SECONDS, Math.round(minutes * 60));
+  }
+
+  /** 分钟数 / 共享模式开关变了，就把检测间隔设成最新值 */
+  async function syncIdleWatch() {
+    if (!api.idle || typeof api.idle.setDetectionInterval !== 'function') return;
     try {
-      api.alarms.clear(AUTO_LOCK_ALARM);
+      const settings = await S.getSettings();
+      api.idle.setDetectionInterval(idleThresholdSeconds(settings));
     } catch (err) {
       /* ignore */
     }
   }
 
-  async function scheduleAutoLock(options) {
-    const force = !!(options && options.force);
+  /**
+   * state 由 onStateChanged 事件带来；省略时主动查一次当前状态（脚本刚被
+   * 唤醒、想确认有没有错过事件时用）。
+   */
+  async function lockIfIdle(state) {
     try {
       const settings = await S.getSettings();
+      if (!settings || !settings.sharedMode) return;
       const c = await getCache();
-      const eligible = !!(settings && settings.sharedMode && c && c.encrypted && !isLocked(c));
-      if (!eligible) {
-        clearAutoLock();
-        return;
+      if (!c || !c.encrypted || isLocked(c)) return;
+      let current = state;
+      if (!current) {
+        if (!api.idle || typeof api.idle.queryState !== 'function') return;
+        current = await api.idle.queryState(idleThresholdSeconds(settings));
       }
-      if (force) {
-        clearAutoLock();
-      } else {
-        // 非强制：只在还没有倒计时的时候才补挂一个，不打断已经在跑的倒计时
-        const existing = await api.alarms.get(AUTO_LOCK_ALARM).catch(() => null);
-        if (existing) return;
-      }
-      const minutes = Math.min(Math.max(Number(settings.autoLockMinutes) || 5, 1), 60);
-      api.alarms.create(AUTO_LOCK_ALARM, { delayInMinutes: minutes });
+      if (current === 'idle' || current === 'locked') await lockVault();
     } catch (err) {
       /* ignore */
     }
+  }
+
+  if (api.idle && api.idle.onStateChanged) {
+    // 必须在脚本顶层同步注册：迟注册会错过唤醒 service worker 的那次状态变化
+    api.idle.onStateChanged.addListener((state) => {
+      lockIfIdle(state).catch(() => undefined);
+    });
   }
 
   /* ------------------------------------------------------------------ *
@@ -1168,8 +1188,8 @@
     // 解锁立即返回，同步在后台继续执行，避免因远端/写入慢而卡住界面
     requestSync().catch(() => undefined);
     notifyTabs();
-    // 共享电脑模式：解锁后挂闲置自动锁定（刚解锁，强制给一个全新的倒计时）
-    scheduleAutoLock({ force: true }).catch(() => undefined);
+    // 共享电脑模式：解锁后按当前分钟数设好闲置检测
+    syncIdleWatch().catch(() => undefined);
     return {
       ok: true,
       encrypted: true,
@@ -1179,7 +1199,6 @@
   }
 
   async function lockVault() {
-    clearAutoLock();
     const c = await getCache();
     if (!c.encrypted) return { ok: false, error: '密码库未启用加密' };
     await persist(); // 先确保密文是最新的
@@ -1828,23 +1847,9 @@
       if (settings && settings.sharedMode) {
         await S.clearRememberedKey().catch(() => undefined);
         // 已强制关闭的本地行为无需额外动作，normalizeSettings 已保证
-        const cLock = await getCache();
-        if (cLock && cLock.encrypted && !isLocked(cLock)) {
-          // 用户在设置页改了分钟数 / 刚打开共享模式：按新值重新起算
-          await scheduleAutoLock({ force: true }).catch(() => undefined);
-        } else {
-          clearAutoLock();
-        }
-      } else {
-        // 退出共享模式：若仍是解锁态，清理掉残留的自动锁定闹钟
-        const c2 = await getCache();
-        if (!settings.sharedMode && c2 && c2.encrypted && isLocked(c2)) clearAutoLock();
-        // 未开启共享模式时，若当前无自动锁定需求也清理
-        try {
-          const s2 = await S.getSettings();
-          if (!s2.sharedMode) clearAutoLock();
-        } catch (err) { /* ignore */ }
       }
+      // 闲置分钟数 / 共享模式开关可能刚被改掉，按最新值重设检测间隔
+      await syncIdleWatch();
       if (settings.webdavUrl) {
         const c = await getCache();
         if (!isLocked(c)) requestSync().catch(() => undefined);
@@ -1889,19 +1894,6 @@
   });
 
   api.alarms.onAlarm.addListener((alarm) => {
-    if (alarm.name === AUTO_LOCK_ALARM) {
-      // 共享电脑模式下的闲置自动锁定
-      (async () => {
-        try {
-          const settings = await S.getSettings();
-          if (!settings || !settings.sharedMode) return;
-          const c = await getCache();
-          if (!c || !c.encrypted || isLocked(c)) return;
-          await lockVault();
-        } catch (err) { /* ignore */ }
-      })();
-      return;
-    }
     if (alarm.name === SYNC_ALARM || alarm.name === RETRY_ALARM) {
       syncNow().then((result) => {
         if (!result.ok && result.configured && !result.locked) scheduleRetry();
@@ -1910,28 +1902,22 @@
     }
   });
 
-  // 页面配置变化后（比如在设置页改了同步间隔）无需 reload 扩展
+  // 页面配置变化后（比如在设置页改了同步间隔 / 闲置分钟数）无需 reload 扩展
   if (api.storage && api.storage.onChanged) {
     api.storage.onChanged.addListener((changes, area) => {
       if (area === 'local' && changes.settings) {
         setupAlarm().catch(() => undefined);
         refreshBadge().catch(() => undefined);
-        // 共享模式切换 / 改了闲置分钟数时重排自动锁定（都是用户显式保存设置触发的）
-        (async () => {
-          try {
-            const settings = await S.getSettings();
-            if (settings && settings.sharedMode) await scheduleAutoLock({ force: true });
-            else clearAutoLock();
-          } catch (err) { /* ignore */ }
-        })();
+        syncIdleWatch().catch(() => undefined);
       }
     });
   }
 
   setupAlarm()
     .then(() => refreshBadge())
-    // 脚本每次被系统重新唤醒都会跑到这里：不能传 force，否则周期同步 /
-    // 失败重试等后台杂事会不断把倒计时续命，导致闲置锁定永远不触发。
-    .then(() => scheduleAutoLock())
+    .then(() => syncIdleWatch())
+    // 脚本每次被系统唤醒都会跑到这里：主动查一次当前状态，防止状态变化
+    // 恰好发生在 service worker 被回收的间隙、错过了 onStateChanged 事件。
+    .then(() => lockIfIdle())
     .catch(() => undefined);
 })();

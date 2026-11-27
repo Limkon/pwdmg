@@ -440,18 +440,16 @@ test('地址只填到目录时，测试连接和保存都落到 vault.json', asy
 });
 
 /* ------------------------------------------------------------------ *
- * 共享电脑模式：闲置自动锁定
+ * 共享电脑模式：闲置自动锁定（真正的活动闲置检测，chrome.idle / browser.idle）
  *
- * 回归用例：service worker 被系统回收后，任何后台事件（周期同步 / 失败重试 /
- * 别的消息）唤醒它重新跑脚本时，不应该把已经在跑的倒计时重置掉，否则只要后台
- * 一直有动静，闲置锁定就永远不会触发——这正是真实反馈的 bug（设置了 15
- * 分钟闲置锁定，页面挂着不操作，超过 15 分钟也不锁定）。
+ * 用系统级「有没有键盘鼠标输入」来判断闲置，而不是「解锁后固定 N 分钟」的
+ * 倒计时——之前那版倒计时会被后台杂事（周期同步 / 失败重试）不断续命，导致
+ * 挂着页面不操作也永远不锁；现在只要系统真的报告 idle / locked 才会锁。
  * ------------------------------------------------------------------ */
 
-const AUTO_LOCK_ALARM = 'pwdmg-autolock';
 const MASTER = 'master-pass-123';
 
-test('共享电脑模式：解锁后按闲置分钟数挂自动锁定闹钟', async (t) => {
+test('共享电脑模式：解锁后按闲置分钟数设置 idle 检测间隔', async (t) => {
   const fake = loadBackground();
   fake.store.set('settings', {}); // 未配置 WebDAV，纯本地也要能用
 
@@ -461,57 +459,83 @@ test('共享电脑模式：解锁后按闲置分钟数挂自动锁定闹钟', as
   fake.store.set('settings', { sharedMode: true, autoLockMinutes: 15 });
   await fake.send({ type: 'settings:changed' });
 
-  await waitFor(() => fake.alarms.get(AUTO_LOCK_ALARM), { label: '自动锁定闹钟' });
-  assert.equal(fake.alarms.get(AUTO_LOCK_ALARM).delayInMinutes, 15);
+  await waitFor(() => fake.idle.detectionInterval === 15 * 60, { label: 'idle 检测间隔' });
+  assert.equal(fake.idle.detectionInterval, 15 * 60);
 });
 
-test('共享电脑模式：service worker 被系统唤醒重跑脚本不应重置闲置倒计时', async (t) => {
+test('共享电脑模式：系统报告 idle 状态时锁定密码库', async (t) => {
   const fake = loadBackground();
   fake.store.set('settings', {});
   await fake.send({ type: 'vault:enableEncryption', password: MASTER });
   fake.store.set('settings', { sharedMode: true, autoLockMinutes: 15 });
   await fake.send({ type: 'settings:changed' });
-  await waitFor(() => fake.alarms.get(AUTO_LOCK_ALARM), { label: '自动锁定闹钟' });
-  assert.equal(fake.alarms.get(AUTO_LOCK_ALARM).delayInMinutes, 15);
 
-  // 模拟 service worker 被系统回收后重新唤醒（比如周期同步 / 失败重试触发）：
-  // chrome.storage.session 和 chrome.alarms 是浏览器维护的，不会因为脚本
-  // 重新执行而丢失；只有内存状态会清空，所以要把它们一起带进新的「实例」。
-  const fresh = loadBackground({ store: fake.store, session: fake.session, alarms: fake.alarms });
-  const status = await fresh.send({ type: 'vault:status' });
-  assert.equal(status.locked, false, '会话密钥应该从 storage.session 恢复，不需要重新解锁');
+  const before = await fake.send({ type: 'vault:status' });
+  assert.equal(before.locked, false);
 
-  // 等脚本末尾的兜底 scheduleAutoLock() 跑完：这次重新执行完全不应该碰这个闹钟
-  await new Promise((resolve) => setTimeout(resolve, 60));
-  const touched = fresh.alarmCalls.filter((c) => c.name === AUTO_LOCK_ALARM);
-  assert.deepEqual(touched, [], 'service worker 被动唤醒不应该清除/重建已经在跑的闲置倒计时');
-  assert.equal(fresh.alarms.get(AUTO_LOCK_ALARM).delayInMinutes, 15, '倒计时时长应保持不变');
+  fake.triggerIdle('idle');
+  await waitFor(async () => (await fake.send({ type: 'vault:status' })).locked, { label: '系统闲置后锁定' });
+  const after = await fake.send({ type: 'vault:status' });
+  assert.equal(after.locked, true);
 });
 
-test('共享电脑模式：在设置页改闲置分钟数，会按新值强制重排倒计时', async (t) => {
-  const fake = loadBackground();
-  fake.store.set('settings', {});
-  await fake.send({ type: 'vault:enableEncryption', password: MASTER });
-  fake.store.set('settings', { sharedMode: true, autoLockMinutes: 15 });
-  await fake.send({ type: 'settings:changed' });
-  await waitFor(() => fake.alarms.get(AUTO_LOCK_ALARM), { label: '自动锁定闹钟' });
-  assert.equal(fake.alarms.get(AUTO_LOCK_ALARM).delayInMinutes, 15);
-
-  fake.store.set('settings', { sharedMode: true, autoLockMinutes: 30 });
-  await fake.send({ type: 'settings:changed' });
-  await waitFor(() => fake.alarms.get(AUTO_LOCK_ALARM).delayInMinutes === 30, { label: '按新分钟数重排' });
-  assert.equal(fake.alarms.get(AUTO_LOCK_ALARM).delayInMinutes, 30);
-});
-
-test('共享电脑模式：锁定后清除闲置自动锁定闹钟', async (t) => {
+test('共享电脑模式：锁屏（locked 状态）同样会触发锁定', async (t) => {
   const fake = loadBackground();
   fake.store.set('settings', {});
   await fake.send({ type: 'vault:enableEncryption', password: MASTER });
   fake.store.set('settings', { sharedMode: true, autoLockMinutes: 5 });
   await fake.send({ type: 'settings:changed' });
-  await waitFor(() => fake.alarms.get(AUTO_LOCK_ALARM), { label: '自动锁定闹钟' });
 
-  const locked = await fake.send({ type: 'vault:lock' });
-  assert.equal(locked.ok, true, locked.error);
-  assert.equal(fake.alarms.get(AUTO_LOCK_ALARM), undefined, '锁定后应清掉倒计时闹钟');
+  fake.triggerIdle('locked');
+  await waitFor(async () => (await fake.send({ type: 'vault:status' })).locked, { label: '锁屏后锁定' });
+});
+
+test('共享电脑模式：没开共享模式 / 没加密时，系统闲置不会锁定', async (t) => {
+  const fake = loadBackground();
+  fake.store.set('settings', {}); // sharedMode 默认关闭
+  await fake.send({ type: 'vault:enableEncryption', password: MASTER });
+
+  fake.triggerIdle('idle');
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  const status = await fake.send({ type: 'vault:status' });
+  assert.equal(status.locked, false, '没开共享模式时闲置检测不应该生效');
+});
+
+test('共享电脑模式：service worker 被动唤醒时补查一次 idle 状态（防止错过事件）', async (t) => {
+  const fake = loadBackground();
+  fake.store.set('settings', {});
+  await fake.send({ type: 'vault:enableEncryption', password: MASTER });
+  fake.store.set('settings', { sharedMode: true, autoLockMinutes: 15 });
+  await fake.send({ type: 'settings:changed' });
+
+  // 模拟「状态变化恰好发生在 service worker 被回收期间，onStateChanged
+  // 事件被错过了」：不调用 triggerIdle（不派发事件），只是让浏览器维护的
+  // 闲置状态变成 idle，chrome.storage.session 也照样带过去（浏览器没重启）。
+  const fresh = loadBackground({
+    store: fake.store,
+    session: fake.session,
+    idle: { current: 'idle', detectionInterval: fake.idle.detectionInterval },
+  });
+  await waitFor(async () => (await fresh.send({ type: 'vault:status' })).locked, {
+    label: '被动唤醒时补查 idle 状态并锁定',
+  });
+});
+
+test('共享电脑模式：锁定后手动解锁，之后系统活跃不会被误锁', async (t) => {
+  const fake = loadBackground();
+  fake.store.set('settings', {});
+  await fake.send({ type: 'vault:enableEncryption', password: MASTER });
+  fake.store.set('settings', { sharedMode: true, autoLockMinutes: 5 });
+  await fake.send({ type: 'settings:changed' });
+
+  fake.triggerIdle('idle');
+  await waitFor(async () => (await fake.send({ type: 'vault:status' })).locked, { label: '先闲置锁定一次' });
+
+  const unlocked = await fake.send({ type: 'vault:unlock', password: MASTER });
+  assert.equal(unlocked.ok, true, unlocked.error);
+
+  fake.triggerIdle('active');
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  const status = await fake.send({ type: 'vault:status' });
+  assert.equal(status.locked, false, 'active 状态不应该触发任何锁定逻辑');
 });
