@@ -180,6 +180,23 @@ test('normalize 会补全字段并排除无 host 的垃圾数据', () => {
   assert.equal(e.useCount, 0);
 });
 
+test('normalize：同一站点 + 用户名的两条记录 updatedAt 完全相同时，后写入的那条生效', () => {
+  // 自动记录和手工在设置页改同一账号几乎总是前后脚发生，在同一毫秒内完成时
+  // updatedAt 会完全相等。之前用 `>` 判断新旧，时间相同时谁赢取决于 Map 的
+  // 历史迭代顺序，表现为随机抖动；回归点是改成 `>=` 后，数组里排在后面的
+  // （也就是后写入的）那条应该始终胜出，不依赖具体时间差。
+  const tie = '2025-06-01T00:00:00.000Z';
+  const normalized = V.normalize(
+    vaultWith([
+      entry({ id: 'auto-captured', username: 'alice', password: 'pw-auto', updatedAt: tie, createdAt: tie }),
+      entry({ id: 'manual-edit', username: 'alice', password: 'pw-manual', updatedAt: tie, createdAt: tie }),
+    ])
+  );
+  assert.equal(normalized.entries.length, 1, '同一 host + 用户名只能留一条');
+  assert.equal(normalized.entries[0].id, 'manual-edit');
+  assert.equal(normalized.entries[0].password, 'pw-manual');
+});
+
 test('markUsed 只更新使用次数，不改变 updatedAt', () => {
   const created = V.upsert(V.empty(), { url: 'https://a.com', username: 'a', password: 'b' });
   const used = V.markUsed(created.vault, created.entry.id);
